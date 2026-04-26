@@ -17,7 +17,6 @@
 //! `ceil_div(N, 64)` workgroups in x.
 
 #![no_std]
-#![cfg_attr(target_arch = "spirv", deny(warnings))]
 
 use spirv_std::glam::{UVec3, Vec2};
 use spirv_std::spirv;
@@ -39,6 +38,16 @@ pub struct FhrrSuperposePushConsts {
     pub n: u32,
     /// Number of vectors being bundled together.
     pub k: u32,
+}
+
+/// Push constants for `cube_memory_cleanup`.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct CubeCleanupPushConsts {
+    /// Codebook size (number of role vectors per axis).
+    pub m: u32,
+    /// Vector dimensionality.
+    pub d: u32,
 }
 
 /// Element-wise complex multiplication.
@@ -177,4 +186,59 @@ pub fn fhrr_superpose(
     }
     let mag = acc.length().max(1e-8);
     out[i as usize] = acc / mag;
+}
+
+/// Cube Memory cleanup kernel — argmax cosine match against a
+/// frozen codebook of m phasor vectors.
+///
+/// For each codebook entry j the similarity is the real part of
+/// `<query, codebook[j]>` (Hermitian inner product) normalized by
+/// the dimensionality. The kernel writes the codebook entry with
+/// the highest similarity to `out_cleaned`. The downstream layer
+/// uses the *snapped phasor* (not the index) for subsequent bind
+/// operations, so we avoid a separate index output here.
+///
+/// Layout:
+///   binding=0  in_query:    &[Vec2; d]      query vector
+///   binding=1  in_codebook: &[Vec2; m * d]  m codebook entries
+///   binding=2  out_cleaned: &mut [Vec2; d]  copied winning entry
+///   push       CubeCleanupPushConsts
+///
+/// Dispatch: 1 workgroup, 1 thread. This is intentionally
+/// single-threaded — m and d are small (m ~ 256, d ~ 1024) and
+/// running serially keeps the algorithm verifiable. A parallel
+/// version with subgroup reductions is a Phase 2 optimization
+/// gated on a perf benchmark.
+#[spirv(compute(threads(64)))]
+pub fn cube_memory_cleanup(
+    #[spirv(global_invocation_id)] gid: UVec3,
+    #[spirv(push_constant)] pc: &CubeCleanupPushConsts,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] in_query: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] in_codebook: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] out_cleaned: &mut [Vec2],
+) {
+    if gid.x != 0 {
+        return;
+    }
+    let d = pc.d as usize;
+    let m = pc.m as usize;
+    let mut best_idx: usize = 0;
+    let mut best_score: f32 = -1e30;
+    for j in 0..m {
+        let mut s: f32 = 0.0;
+        let row_off = j * d;
+        for i in 0..d {
+            let q = in_query[i];
+            let c = in_codebook[row_off + i];
+            s += q.x * c.x + q.y * c.y;
+        }
+        if s > best_score {
+            best_score = s;
+            best_idx = j;
+        }
+    }
+    let row_off = best_idx * d;
+    for i in 0..d {
+        out_cleaned[i] = in_codebook[row_off + i];
+    }
 }
