@@ -207,19 +207,19 @@ fn cube_memory_cleanup_parity() {
         m: m as u32,
         d: d as u32,
     };
-    let gpu_out: Vec<Vec2> = ctx.run(
-        "cube_memory_cleanup",
-        push,
+    let gpu_out: Vec<Vec2> = ctx.run_pair(
+        "cube_memory_cleanup_score",
         &[bytemuck::cast_slice(&query), bytemuck::cast_slice(&codebook)],
-        d * std::mem::size_of::<Vec2>(),
+        (m as u32, 1, 1),
+        "cube_memory_cleanup_finalize",
+        &[bytemuck::cast_slice(&codebook)],
+        1,
         (1, 1, 1),
+        m * std::mem::size_of::<f32>(),
+        d * std::mem::size_of::<Vec2>(),
+        push,
     );
 
-    // Argmax with random unit phasors can have near-ties at fp32 noise,
-    // so compare values not the index choice; the chosen vector should
-    // match the CPU's choice up to fp tolerance OR the second-best,
-    // depending on float order. Use the value-norm test: the chosen
-    // entry must have the exact CPU-reference vector content.
     assert_close(&cpu_out, &gpu_out, 1e-5);
 }
 
@@ -250,16 +250,20 @@ fn cube_memory_retrieve_parity() {
         d_value: d_value as u32,
         top_k: top_k as u32,
     };
-    let gpu_out: Vec<f32> = ctx.run(
-        "cube_memory_retrieve",
-        push,
+    let gpu_out: Vec<f32> = ctx.run_pair(
+        "cube_memory_retrieve_score",
         &[
             bytemuck::cast_slice(&query),
             bytemuck::cast_slice(&slot_keys),
-            bytemuck::cast_slice(&slot_values),
         ],
-        d_value * std::mem::size_of::<f32>(),
+        (n_slots as u32, 1, 1),
+        "cube_memory_retrieve_finalize",
+        &[bytemuck::cast_slice(&slot_values)],
+        0,
         (1, 1, 1),
+        n_slots * std::mem::size_of::<f32>(),
+        d_value * std::mem::size_of::<f32>(),
+        push,
     );
 
     // Slightly looser tolerance — softmax/exp introduces tiny fp drift

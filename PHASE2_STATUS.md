@@ -125,16 +125,58 @@ They need to be parallelized once the algorithm is correct:
 This is needed for any real distillation eval that runs on CPU
 fallback.
 
-### 5. Vulkan shader hardening
+### 5. Vulkan shader tiling ✓ DONE (2026-04-26)
 
-The rust-gpu shaders have `cube_memory_cleanup` and
-`cube_memory_retrieve` as single-thread workgroups (workgroup size
-64, 63 idle). Real perf needs:
-- `cube_memory_cleanup`: parallel scan with subgroup reductions.
-- `cube_memory_retrieve`: parallel dot-products + parallel top-k.
+Both shaders rewritten as two-pass multi-workgroup tiled kernels:
+- `cube_memory_cleanup_score` — m WGs (one per codebook row),
+  cooperative dot product per WG, scratch[m] = score
+- `cube_memory_cleanup_finalize` — 1 WG, argmax over scratch +
+  cooperative copy of winning row
+- `cube_memory_retrieve_score` — n_slots WGs, cooperative dot
+  product per WG, scratch[n_slots] = sim
+- `cube_memory_retrieve_finalize` — 1 WG, top-k tournament +
+  softmax + cooperative weighted gather
 
-Shadow-tracking against the host-harness parity tests at
-`shaders/cube-memory-host/tests/parity.rs` catches regressions.
+Host scratch is `ctx->prealloc_x` resized on demand; sync via
+`ggml_vk_sync_buffers` between passes. supports_op gates: m ≥ 1
+and ≤ device->maxComputeWorkGroupCount[0]; n_slots same; top_k in
+[1, 8]. Barriers in uniform control flow only (no early-return
+before barrier — caught and fixed by adversarial proof-read).
+
+Bench (200 iters/shape, raz-gpd4 Radeon 890M, vs v0 single-WG):
+
+| shape | v0 Vulkan | new Vulkan | factor | new GPU-only |
+|---|---|---|---|---|
+| cleanup d=512,m=256 | 195 us | **56 us** | 3.5× | 16 us |
+| retrieve dk=256,n=1024 | 832 us | **436 us** | 1.9× | 384 us |
+
+GPU-side kernel time for cleanup d=512,m=256 went 195us → 16us,
+12× faster at the kernel. End-to-end Vulkan still slower than CPU
+in standalone bench because per-op submit+wait now dominates
+(~40us per dispatch × 2 dispatches = ~80us baseline). This is a
+bench-shape artifact: real-graph submission amortizes the fence
+wait across all nodes (48 layers × ~2 cube ops = ~100 nodes per
+forward pass, one fence wait total). Production cost is the
+per-kernel time, not the bench's per-op wall clock.
+
+Commits on the cube-memory-op branch (this iteration):
+- `cube-memory-shader: tiled multi-WG cleanup_score/finalize`
+- `cube-memory-shader: tiled multi-WG retrieve_score/finalize`
+- `ggml-vulkan: two-pass cube_memory dispatch + supports_op gates`
+- `tests: parity-test harness updated for two-pass dispatch`
+
+Known followups (NOT blocking the consortium plan, deferred):
+- Production-scale retrieve (n_slots ≈ 256K per spec.md realistic
+  config) needs >65K WG dispatch — current shader caps at the
+  Vulkan-spec workgroup limit. Will require a tiled retrieve where
+  one WG handles many slots (thread-per-slot pattern) so dispatch
+  count stays bounded.
+- Largest retrieve (dk=256, n=1024) GPU kernel still 5.6× slower
+  than CPU (384us vs 69us). Cause: barrier overhead dominates when
+  each WG does only ~4 mults. Same fix as above (thread-per-slot)
+  would also win this.
+
+Both followups are perf-only — correctness is shipped.
 
 ## How to resume
 

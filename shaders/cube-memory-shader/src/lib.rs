@@ -42,17 +42,21 @@ pub struct FhrrSuperposePushConsts {
     pub k: u32,
 }
 
-/// Push constants for `cube_memory_cleanup`.
+/// Push constants for the cleanup score + finalize passes. Both
+/// passes share the struct (m, d) so the host only writes one push
+/// block per dispatch pair.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct CubeCleanupPushConsts {
     /// Codebook size (number of role vectors per axis).
     pub m: u32,
-    /// Vector dimensionality.
+    /// Vector dimensionality (in Vec2 phasors).
     pub d: u32,
 }
 
-/// Push constants for `cube_memory_retrieve`.
+/// Push constants for the retrieve score + finalize passes. d_key is
+/// only consumed by score; d_value and top_k only by finalize. n_slots
+/// is read by both. Single struct keeps the dispatch site simple.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct CubeRetrievePushConsts {
@@ -204,50 +208,81 @@ pub fn fhrr_superpose(
     out[i as usize] = acc / mag;
 }
 
-/// Cube Memory cleanup kernel — argmax cosine match against a
-/// frozen codebook of m phasor vectors.
-///
-/// For each codebook entry j the similarity is the real part of
-/// `<query, codebook[j]>` (Hermitian inner product) normalized by
-/// the dimensionality. The kernel writes the codebook entry with
-/// the highest similarity to `out_cleaned`. The downstream layer
-/// uses the *snapped phasor* (not the index) for subsequent bind
-/// operations, so we avoid a separate index output here.
-///
-/// Layout:
-///   binding=0  in_query:    &[Vec2; d]      query vector
-///   binding=1  in_codebook: &[Vec2; m * d]  m codebook entries
-///   binding=2  out_cleaned: &mut [Vec2; d]  copied winning entry
-///   push       CubeCleanupPushConsts
-///
-/// Dispatch: 1 workgroup, 1 thread. This is intentionally
-/// single-threaded — m and d are small (m ~ 256, d ~ 1024) and
-/// running serially keeps the algorithm verifiable. A parallel
-/// version with subgroup reductions is a Phase 2 optimization
-/// gated on a perf benchmark.
 /// Workgroup size for the parallel cleanup/retrieve kernels. Chosen
 /// to match the warp/subgroup width on RDNA (64) — also a multiple of
 /// 32 so NVIDIA subgroups don't fragment.
 const WG_SIZE: usize = 64;
 
-/// Parallel cube memory cleanup. Each thread in the workgroup
-/// scans a strided slice of the codebook (j = tid, tid + WG, …)
-/// and keeps a local (idx, score) best. A shared-memory tree
-/// reduction picks the global argmax. Thread 0 writes the winning
-/// codebook row to the output, with the d-element copy itself
-/// parallelized across the workgroup.
+/// Cube memory cleanup — pass 1 of 2. One workgroup per codebook
+/// row; the WG cooperatively computes the dot product
+/// `<query, codebook[wg_id]>` (real Hermitian inner product) and
+/// writes the score to `scratch[wg_id]`. Index is implicit in the
+/// workgroup id, so we don't need to store it.
 ///
-/// Tie-break: preserved as first-wins (lower codebook index) to
-/// match the serial CPU reference exactly. The reduction's
-/// comparison favors strictly-greater scores, then for ties the
-/// smaller index. The local within-thread scan also favors lower
-/// indices on ties (`if s > local_best`).
+/// Dispatch: m workgroups in x, 1 in y/z. Each WG is 64 threads.
+/// `m` covers the entire codebook in one launch — the host gates
+/// supports_op on m fitting under the device's per-dimension WG-count
+/// limit.
+///
+/// Reduction: each thread accumulates a strided slice of the dot
+/// product, then a single `subgroup_f_add` (`OpGroupNonUniformFAdd`,
+/// `Reduce` group operation) collapses the 64 thread-local sums into
+/// one wave-wide value. On RDNA wave64 the subgroup IS the workgroup,
+/// so this is one HW shuffle — no LDS partials, no tree-reduction
+/// barriers. Requires the `GroupNonUniformArithmetic` SPIR-V
+/// capability (rust-gpu emits it automatically when the intrinsic is
+/// used).
 #[spirv(compute(threads(64)))]
-pub fn cube_memory_cleanup(
+pub fn cube_memory_cleanup_score(
+    #[spirv(workgroup_id)] wid: UVec3,
     #[spirv(local_invocation_id)] lid: UVec3,
     #[spirv(push_constant)] pc: &CubeCleanupPushConsts,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] in_query: &[Vec2],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] in_codebook: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] scratch: &mut [f32],
+) {
+    let tid = lid.x as usize;
+    let row = wid.x as usize;
+    let d = pc.d as usize;
+    let m = pc.m as usize;
+
+    // Each thread strides through the d-element row, accumulating its
+    // local share of the dot product. Out-of-range rows still execute
+    // the subgroup op below (the op must be in convergent control
+    // flow), but contribute zero to the reduction; we guard the
+    // memory loads by clamping the loop bound.
+    let row_off = row * d;
+    let mut acc: f32 = 0.0;
+    if row < m {
+        let mut i = tid;
+        while i < d {
+            let q = in_query[i];
+            let c = in_codebook[row_off + i];
+            acc += q.x * c.x + q.y * c.y;
+            i += WG_SIZE;
+        }
+    }
+
+    // Wave64 reduce: one HW instruction, no LDS partials, no barriers.
+    let sum = spirv_std::arch::subgroup_f_add::<f32>(acc);
+
+    if tid == 0 && row < m {
+        scratch[row] = sum;
+    }
+}
+
+/// Cube memory cleanup — pass 2 of 2. Single workgroup of 64 threads
+/// reduces `scratch[0..m]` to a global argmax (tie-break: smaller
+/// index wins, matching the CPU reference) and then cooperatively
+/// copies `codebook[best_idx]` to `out_cleaned`.
+///
+/// Dispatch: 1 workgroup in x/y/z.
+#[spirv(compute(threads(64)))]
+pub fn cube_memory_cleanup_finalize(
+    #[spirv(local_invocation_id)] lid: UVec3,
+    #[spirv(push_constant)] pc: &CubeCleanupPushConsts,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] in_codebook: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] scratch: &[f32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] out_cleaned: &mut [Vec2],
     #[spirv(workgroup)] shared_idx: &mut [u32; WG_SIZE],
     #[spirv(workgroup)] shared_score: &mut [f32; WG_SIZE],
@@ -256,19 +291,15 @@ pub fn cube_memory_cleanup(
     let d = pc.d as usize;
     let m = pc.m as usize;
 
-    // Each thread scans codebook entries j = tid, tid + WG, ...
+    // Each thread scans scratch entries j = tid, tid+WG, ... keeping
+    // a local best. Tie-break on score equality: prefer the smaller
+    // codebook index (matches CPU `>` comparison: first wins).
     let mut local_best_idx: u32 = 0;
     let mut local_best_score: f32 = -1e30;
     {
         let mut j = tid;
         while j < m {
-            let mut s: f32 = 0.0;
-            let row_off = j * d;
-            for i in 0..d {
-                let q = in_query[i];
-                let c = in_codebook[row_off + i];
-                s += q.x * c.x + q.y * c.y;
-            }
+            let s = scratch[j];
             if s > local_best_score {
                 local_best_score = s;
                 local_best_idx = j as u32;
@@ -276,24 +307,15 @@ pub fn cube_memory_cleanup(
             j += WG_SIZE;
         }
     }
-
     shared_idx[tid] = local_best_idx;
     shared_score[tid] = local_best_score;
     spirv_std::arch::workgroup_memory_barrier_with_group_sync();
 
-    // Tree reduction over the workgroup. Tie-break: prefer
-    // smaller codebook index when scores are exactly equal.
     let mut stride = WG_SIZE / 2;
     while stride > 0 {
         if tid < stride {
             let other_score = shared_score[tid + stride];
             let other_idx = shared_idx[tid + stride];
-            // Tie-break: at exact-equal scores prefer the smaller
-            // index. Using strict equality is ULP-fragile under fp32
-            // sums-in-different-order, but at our scale (d ≤ 128 in
-            // current tests, m ≤ 64) the rounding error envelope is
-            // far below any deliberate tie. Documented as a known
-            // soft spot for very-large-d future configs.
             let take = other_score > shared_score[tid]
                 || (other_score == shared_score[tid] && other_idx < shared_idx[tid]);
             if take {
@@ -305,7 +327,6 @@ pub fn cube_memory_cleanup(
         stride /= 2;
     }
 
-    // Cooperative copy of the winning row.
     let best_idx = shared_idx[0] as usize;
     let row_off = best_idx * d;
     let mut i = tid;
@@ -315,80 +336,112 @@ pub fn cube_memory_cleanup(
     }
 }
 
-/// Maximum top_k supported by `cube_memory_retrieve`. Bounded so we
-/// can use stack-allocated arrays for the running top-k tournament.
-/// 8 covers the typical Memory Layer setting (PEER uses k=4 or 8).
+/// Maximum top_k supported by retrieve. Bounded so we can use
+/// stack-allocated arrays for the running top-k tournament. 8 covers
+/// the typical Memory Layer setting (PEER uses k=4 or 8).
 const MAX_TOP_K: usize = 8;
 
-/// Cube Memory retrieve kernel — top-k slot-key dot product +
-/// softmax-weighted slot-value gather.
-///
-/// Phase A (parallel): each thread in the workgroup computes a
-///   strided slice of the n_slots similarities into shared memory.
-/// Phase B (serial, thread 0): full sliding-min top-k tournament
-///   over the populated sims array, then softmax.
-/// Phase C (parallel): each thread computes one or more elements
-///   of the weighted-sum output.
-///
-/// Phase B is single-thread because k <= 8 makes the tournament
-/// negligible compared to phase A's d_key * n_slots multiply-adds;
-/// parallelizing the tournament adds barriers and reduction
-/// machinery for an op that already runs in microseconds.
-///
-/// Layout:
-///   binding=0  in_query:       &[f32; d_key]
-///   binding=1  in_slot_keys:   &[f32; n_slots * d_key]
-///   binding=2  in_slot_values: &[f32; n_slots * d_value]
-///   binding=3  out:            &mut [f32; d_value]
-///   push       CubeRetrievePushConsts
-///
-/// Maximum n_slots in this v0 parallel kernel is `MAX_SHARED_SLOTS`,
-/// bounded by the workgroup-shared sims array size. Future versions
-/// will tile across multiple workgroups; the host clamps n_slots
-/// to ≤ MAX_SHARED_SLOTS via supports_op.
-const MAX_SHARED_SLOTS: usize = 1024;
+/// Maximum d_key (in f32 elements) supported by retrieve_score's LDS
+/// staging buffer. 4096 floats = 16 KB per WG, well under the RDNA3
+/// 64 KB/CU shared LDS budget. The host's supports_op gates d_key on
+/// this; values larger than MAX_D_KEY_LDS fall back to CPU.
+pub const MAX_D_KEY_LDS: usize = 4096;
 
+/// Cube memory retrieve — pass A of B. Cooperative wave64 reduction:
+/// one workgroup per slot, 64 threads per WG. Each thread accumulates
+/// a strided slice of the slot's `<query, slot_keys[wg]>` dot product,
+/// then a single `subgroup_f_add` (`OpGroupNonUniformFAdd`, `Reduce`
+/// group operation) collapses the 64 thread-local sums into one
+/// wave-wide value in a single HW instruction. Thread 0 writes
+/// `scratch[wg]`.
+///
+/// Why this layout (vs the thread-per-slot variant): cooperative wave
+/// reads consecutive elements of the same slot row → 64-lane coalesced
+/// DRAM loads. Why subgroup_f_add (vs LDS tree reduction): drops the
+/// 6 barriers + 6 LDS round-trips of the log2(64) tree, replacing
+/// them with one HW shuffle. On RDNA wave64 the subgroup IS the
+/// workgroup, so the reduction is exact.
+///
+/// The query is read directly from global memory by every thread
+/// (cache-resident after the first stride), no LDS staging needed —
+/// removing the staging buffer also frees up LDS budget so the
+/// d_key ≤ MAX_D_KEY_LDS gate is no longer required by this kernel.
+/// We keep MAX_D_KEY_LDS and the host gate anyway as a sanity bound.
+///
+/// Dispatch: n_slots workgroups in x, 1 in y/z. Host gates
+/// supports_op on n_slots ≤ device per-dimension WG-count limit.
 #[spirv(compute(threads(64)))]
-pub fn cube_memory_retrieve(
+pub fn cube_memory_retrieve_score(
+    #[spirv(workgroup_id)] wid: UVec3,
     #[spirv(local_invocation_id)] lid: UVec3,
     #[spirv(push_constant)] pc: &CubeRetrievePushConsts,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] in_query: &[f32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] in_slot_keys: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] in_slot_values: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] out: &mut [f32],
-    #[spirv(workgroup)] sims: &mut [f32; MAX_SHARED_SLOTS],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] scratch: &mut [f32],
+) {
+    let tid = lid.x as usize;
+    let wg  = wid.x as usize;
+    let n_slots = pc.n_slots as usize;
+    let d_key = pc.d_key as usize;
+
+    // Strided cooperative read of slot row `wg`. Consecutive lanes
+    // touch consecutive elements — the load is 64-wide coalesced.
+    // Out-of-range workgroups still execute the subgroup op below
+    // (it must be in convergent control flow), but skip the loads.
+    let mut acc: f32 = 0.0;
+    if wg < n_slots {
+        let row_off = wg * d_key;
+        let mut i = tid;
+        while i < d_key {
+            acc += in_query[i] * in_slot_keys[row_off + i];
+            i += WG_SIZE;
+        }
+    }
+
+    // Wave64 reduce: one HW instruction.
+    let sum = spirv_std::arch::subgroup_f_add::<f32>(acc);
+
+    if tid == 0 && wg < n_slots {
+        scratch[wg] = sum;
+    }
+}
+
+/// Maximum n_slots gated through the host. Picked one below the
+/// Vulkan-spec minimum guarantee for `maxComputeWorkGroupCount[0]`
+/// (65535) so any conformant device accepts the dispatch. Hosts on
+/// devices that report a higher limit may raise this; hosts must
+/// also clamp to the device's actual limit.
+pub const MAX_RETRIEVE_SLOTS: usize = 65535;
+
+/// Cube memory retrieve — pass B of B. Single workgroup of 64
+/// threads. Reads `scratch[0..n_slots]` (similarities), runs a
+/// sliding-min top-k tournament + numerically-stable softmax in
+/// thread 0, then cooperatively gathers the weighted slot_values
+/// into `out` (parallel over d_value).
+///
+/// Dispatch: 1 workgroup in x/y/z.
+#[spirv(compute(threads(64)))]
+pub fn cube_memory_retrieve_finalize(
+    #[spirv(local_invocation_id)] lid: UVec3,
+    #[spirv(push_constant)] pc: &CubeRetrievePushConsts,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] scratch: &[f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] in_slot_values: &[f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] out: &mut [f32],
+    #[spirv(workgroup)] shared_idx: &mut [u32; MAX_TOP_K],
+    #[spirv(workgroup)] shared_w: &mut [f32; MAX_TOP_K],
 ) {
     let tid = lid.x as usize;
     let n_slots = pc.n_slots as usize;
-    let d_key = pc.d_key as usize;
     let d_value = pc.d_value as usize;
     let k = (pc.top_k as usize).min(MAX_TOP_K);
 
-    // Phase A: strided dot products into shared sims.
-    {
-        let mut j = tid;
-        while j < n_slots {
-            let mut s: f32 = 0.0;
-            let row_off = j * d_key;
-            for i in 0..d_key {
-                s += in_query[i] * in_slot_keys[row_off + i];
-            }
-            sims[j] = s;
-            j += WG_SIZE;
-        }
-    }
-    spirv_std::arch::workgroup_memory_barrier_with_group_sync();
-
-    // Phase B (thread 0): top-k tournament + numerically-stable
-    // softmax over the populated sims. Same algorithm as the v0
-    // serial kernel; output bit-equal up to fp32 noise.
-    let mut topk_idx: [u32; MAX_TOP_K] = [0; MAX_TOP_K];
-    let mut topk_sim: [f32; MAX_TOP_K] = [-1e30; MAX_TOP_K];
-    let mut weights: [f32; MAX_TOP_K] = [0.0; MAX_TOP_K];
-
     if tid == 0 {
-        for j in 0..n_slots {
-            let s = sims[j];
+        let mut topk_idx: [u32; MAX_TOP_K] = [0; MAX_TOP_K];
+        let mut topk_sim: [f32; MAX_TOP_K] = [-1e30; MAX_TOP_K];
+
+        let mut j = 0usize;
+        while j < n_slots {
+            let s = scratch[j];
             let mut min_pos: usize = 0;
             let mut min_val: f32 = topk_sim[0];
             for t in 1..k {
@@ -401,6 +454,7 @@ pub fn cube_memory_retrieve(
                 topk_sim[min_pos] = s;
                 topk_idx[min_pos] = j as u32;
             }
+            j += 1;
         }
 
         let mut sim_max: f32 = topk_sim[0];
@@ -409,6 +463,7 @@ pub fn cube_memory_retrieve(
                 sim_max = topk_sim[t];
             }
         }
+        let mut weights: [f32; MAX_TOP_K] = [0.0; MAX_TOP_K];
         let mut sum_exp: f32 = 0.0;
         for t in 0..k {
             let w = (topk_sim[t] - sim_max).exp();
@@ -417,30 +472,22 @@ pub fn cube_memory_retrieve(
         }
         let inv_sum = 1.0 / sum_exp.max(1e-8);
         for t in 0..k {
-            weights[t] *= inv_sum;
-        }
-
-        // Stash the top-k indices and weights in the first 2*k slots
-        // of `sims` (no longer needed for raw similarities) so the
-        // other threads can read them after the next barrier.
-        for t in 0..k {
-            sims[t] = f32::from_bits(topk_idx[t]);
-            sims[MAX_TOP_K + t] = weights[t];
+            shared_idx[t] = topk_idx[t];
+            shared_w[t]   = weights[t] * inv_sum;
         }
     }
     spirv_std::arch::workgroup_memory_barrier_with_group_sync();
 
-    // Phase C: parallel weighted gather. Each thread computes a
-    // slice of the d_value-dim output using the topk_idx and
-    // weights stashed in shared memory by thread 0.
+    // Parallel weighted gather. Each thread strides through the
+    // d_value-dim output, summing the contribution from each of the
+    // top-k slots.
     let mut i = tid;
     while i < d_value {
         let mut acc: f32 = 0.0;
         for t in 0..k {
-            let idx = sims[t].to_bits() as usize;
-            let w = sims[MAX_TOP_K + t];
-            let row_off = idx * d_value;
-            acc += w * in_slot_values[row_off + i];
+            let idx = shared_idx[t] as usize;
+            let w   = shared_w[t];
+            acc += w * in_slot_values[idx * d_value + i];
         }
         out[i] = acc;
         i += WG_SIZE;

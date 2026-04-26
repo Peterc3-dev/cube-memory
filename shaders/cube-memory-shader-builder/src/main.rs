@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use spirv_builder::{SpirvBuilder, SpirvMetadata};
+use spirv_builder::{Capability, SpirvBuilder, SpirvMetadata};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Workspace-relative path to the shader crate.
@@ -25,6 +25,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ~50x. `None` is the right default; switch to `Full` only
         // when you need to map a SPIR-V crash back to a source line.
         .spirv_metadata(SpirvMetadata::None)
+        // Required for `subgroup_f_add` (`OpGroupNonUniformFAdd`) used
+        // by cube_memory_cleanup_score and cube_memory_retrieve_score.
+        // Vulkan 1.1+ devices that report subgroup-size 64 (RDNA wave64)
+        // expose this; rust-gpu does not auto-infer it from the intrinsic
+        // call site, so we declare it explicitly.
+        .capability(Capability::GroupNonUniformArithmetic)
         .build()?;
 
     let spv = result.module.unwrap_single();
