@@ -128,3 +128,69 @@ Verified in passing while the GPU was warm:
 - Qwen3.6-27B GGUF **embeds its own chat template** (kv 44 `tokenizer.chat_template`) — llama-server picks it up automatically. The differential autoparser on the embedded template reports `supports_tools: true`, `tool_mode: TAG_WITH_TAGGED`, `per_call_start: <tool_call>`, `per_call_end: </tool_call>`. Standard Qwen tool-call tagging — drop-in compatible with llama.cpp's OpenAI-shim endpoint.
 
 BFCL-style benches can drive `llama-server` directly with default flags (no `--chat-template-file` needed, no `--jinja` flag needed); the only knob worth setting is `--reasoning-format deepseek` so the harness can route think-traces out of the assistant content.
+
+## Iteration 7 — BFCL Simple subset baseline (no cube-memory swap)
+
+First endpoint-progress measurement against the recursive-loop stopping bar (BFCL Simple ≥ 80%, Multiple ≥ 60%, fully local on raz-gpd4).
+
+### Setup
+- Build: `b290-9725a31` (`/tmp/llama-mainline/build/bin/llama-server`, Vulkan backend)
+  - **Pre-flight fix:** binary failed to start with `undefined symbol: llama_model_n_devices` — `libllama.so.0` symlink had been bumped to a newer ABI (`0.0.14`) than the matching `libllama-common.so.0.0.290`. Repointed `libllama.so.0 -> libllama.so.0.0.290` and the server came up cleanly.
+- Server config: `-ngl 64 -t 8 --jinja --reasoning-format deepseek -c 4096`
+- Test set: first 25 prompts of `BFCL_v4_simple_python.json` (sparse-cloned from ShishirPatil/gorilla, path `berkeley-function-call-leaderboard/bfcl_eval/data/`); 399 in the full file.
+- Ground truth: `possible_answer/BFCL_v4_simple_python.json` (BFCL format: each param maps to a list of acceptable values; `""` means optional/empty OK).
+- Scoring (per prompt, both binary):
+  1. Function selection: `tool_calls[0].function.name == expected`
+  2. Argument correctness: arguments parse as JSON, all required params present, each provided value is in the ground-truth allowed-values list (with case-insensitive string match + numeric/string flexibility).
+- Eval harness: `/tmp/bfcl_eval/run_eval.py` (stdlib only, OpenAI-shim POST, `temperature=0.0`, `max_tokens=512`, 120 s timeout).
+
+### Sanity check
+Single-prompt curl (`get_weather("Paris")`): structured `tool_calls` returned correctly, `reasoning_content` separated from `content` as configured. No `<tool_call>` tag leakage in `content` — autoparser is firing on the embedded Qwen3.6 chat template, no `--chat-template-file` override needed.
+
+### Results
+
+**Server OOM-killed at prompt 13.** The kernel OOM killer fired at 14:30:54 (confirmed via journalctl) while the server was saving a 179 MiB prompt-cache slot — total prompt cache had grown to 4 060 MiB over 12 prompts (≈ 340 MiB/prompt under default cache config). With 16 GiB system RAM + 7 GiB already in zram swap pre-run + ~16 GiB VRAM model, the cache push tipped it over.
+
+The 12 prompts that completed before the crash:
+
+| metric | score | pct |
+|---|---|---|
+| Function selection | 8/12 | 66.7% |
+| Argument correctness | 8/12 | 66.7% |
+| Combined Simple | 16/24 | **66.7%** |
+
+Per-prompt timing: passes 28-70 s (one outlier 69 s); failures all 102-106 s.
+
+### Failure mode (all 4 misses, identical)
+
+Every failure was `"no tool_calls in response"` with `content == ""` and elapsed time pinned at the timeout-of-prediction (~102-106 s for 512 tokens at ~5 t/s). The model is exhausting `max_tokens` inside the `<think>` reasoning phase and never emitting the actual `<tool_call>`. Examples:
+
+- `simple_python_6` "What are the roots of the quadratic equation where a=2, b=5 and c=3?" → expected `solve_quadratic` — empty content, 102.21 s.
+- `simple_python_7` "What is the circumference of a circle with a radius of 4 inches?" → expected `calculate_circumference` — empty content, 102.24 s.
+- `simple_python_9` "Calculate the area of a circle with a radius of 5 units." → expected `geometry.calculate_area_circle` — empty content, 106.16 s.
+- `simple_python_10` "Calculate the area of a right-angled triangle..." → expected `calculate_area` — empty content, 106.51 s.
+
+These are **not** function-selection failures — they're `max_tokens` / reasoning-budget failures. The DeepSeek-style reasoning consumes the entire 512-token budget on math word problems before the model commits to the call. Bumping `max_tokens` to 1536-2048 (or capping `--reasoning-budget`) is expected to recover most or all of these.
+
+### Bar check
+
+Bar: BFCL Simple ≥ 80%
+Observed: 66.7% on a 12-prompt subset (interrupted by OOM)
+**Verdict:** below bar by ~13 pp on the partial sample, but the failure mode is recoverable (token budget, not capability). Re-run with `max_tokens=2048` and a higher prompt-cache eviction threshold should land closer to the bar; this number is a floor, not a ceiling.
+
+### Action items for Iteration 8 (in order)
+
+1. **Cap prompt cache.** Add `--cache-reuse 0` or `-cps 1024` (slot prompt-cache MiB cap) to keep server-side cache from growing into OOM territory across many requests. The 4 GiB cache after only 12 prompts is the immediate blocker.
+2. **Bump `max_tokens` to 2048** in the eval harness so reasoning has room to finish on math word problems. This alone is expected to convert the 4 timeouts.
+3. **Drop swap pressure before the run.** Pre-run had 7 GiB in zram swap; logging out of GUI sessions or `swapoff` (then on) buys headroom.
+4. Optionally cap `--reasoning-budget 256` to force a faster commit, trading some chain-of-thought for stability.
+5. Once stable, run the full 25-prompt set (and then expand to 50) to get a real BFCL Simple number.
+
+### Cleanup
+Server process already dead from OOM by the time eval finished; `pgrep -fl '/llama-'` confirmed empty post-run. No orphan llama processes.
+
+### Artifacts
+- Eval script: `/tmp/bfcl_eval/run_eval.py`
+- Per-prompt JSONL: `/tmp/bfcl_eval/results.jsonl` (25 lines; first 12 valid, last 13 are connection-refused after OOM)
+- Server log: `/tmp/llama-server.log` (744 lines, ends mid-prompt-cache-save)
+- Run log: `/tmp/bfcl_eval/eval.log`
