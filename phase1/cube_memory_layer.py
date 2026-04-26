@@ -103,10 +103,17 @@ class CubeMemoryLayer(nn.Module):
         return getattr(self, f"codebook_{axis}")
 
     def _query_to_phasor(self, h: torch.Tensor) -> torch.Tensor:
-        """h: (B, T, D) -> phasor (B, T, p, d_codebook)."""
+        """h: (B, T, D) -> phasor (B, T, p, d_codebook).
+
+        Internally upcasts the projection output to fp32 because
+        torch.complex requires Half/Float/Double inputs (no bf16).
+        Whole-layer dtype handling lives in `forward` — the residual
+        update is cast back to the caller's dtype on the way out.
+        """
         x = self.role_proj(h)  # (B, T, p*d_codebook)
+        if x.dtype not in (torch.float32, torch.float64, torch.float16):
+            x = x.to(torch.float32)
         x = x.view(*h.shape[:-1], self.p, self.d_codebook)
-        # Treat the projection output as phase angles, push to unit modulus.
         return _to_phasor(x)
 
     def _cleanup_per_axis(self, q_phasor: torch.Tensor) -> torch.Tensor:
@@ -156,6 +163,12 @@ class CubeMemoryLayer(nn.Module):
         return out.reshape(*q_real.shape[:-1], self.d_value)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
+        # torch.complex doesn't accept bf16; complex math runs in fp32
+        # internally, then we cast the residual update back to the
+        # caller's dtype before returning.
+        in_dtype = h.dtype
+        h = h.to(torch.float32) if in_dtype not in (torch.float32, torch.float64) else h
+
         # Cleanup uses argmax (non-differentiable) but we route the gradient
         # through the role_proj via a straight-through-style trick: the
         # cleaned phasor is `q + (cleaned - q).detach()` so forward sees
@@ -177,4 +190,5 @@ class CubeMemoryLayer(nn.Module):
         # the model learns to *route* hot tokens to slots rather than
         # update everything densely.
         slot_val = self._retrieve(q_real)
-        return self.out_proj(slot_val)
+        out = self.out_proj(slot_val)
+        return out.to(in_dtype) if out.dtype != in_dtype else out

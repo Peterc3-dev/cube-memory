@@ -217,12 +217,17 @@ def distill(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     unfreeze_norms: bool = False,
+    teacher_device: str | None = None,
 ) -> dict[str, Any]:
     """Distill the teacher's logits into the student.
 
     See module docstring for design notes. Returns a metrics dict
     containing the final/last train loss, last grad norm, last LRs,
     and (if `eval_fn` was provided) the last eval result.
+
+    Set `teacher_device` to a different string (e.g., "cpu") to keep
+    the teacher off the student's device — useful on memory-tight
+    setups like Strix Point UMA.
     """
     if steps <= 0:
         raise ValueError(f"steps must be positive, got {steps}")
@@ -230,11 +235,12 @@ def distill(
         raise ValueError(f"grad_accum must be >= 1, got {grad_accum}")
 
     dev = torch.device(device)
+    t_dev = torch.device(teacher_device) if teacher_device is not None else dev
 
     # Freeze teacher fully.
     teacher.eval()
     teacher.requires_grad_(False)
-    teacher.to(dev)
+    teacher.to(t_dev)
 
     # Student must be in training mode so the unit-modulus / STE path
     # in CubeMemoryLayer.forward executes its training-time semantics.
@@ -280,23 +286,34 @@ def distill(
                 input_ids = attempt_batch["input_ids"]
                 attn_mask = attempt_batch.get("attention_mask")
 
+                # Move inputs to each model's device. With teacher_device
+                # set (e.g. "cpu"), the teacher runs on its own hardware
+                # and we ferry just the logits over to the student device
+                # for the loss.
+                t_input_ids = input_ids.to(t_dev)
+                t_attn_mask = attn_mask.to(t_dev) if attn_mask is not None else None
+                s_input_ids = input_ids.to(dev)
+                s_attn_mask = attn_mask.to(dev) if attn_mask is not None else None
+
                 with torch.no_grad():
-                    if autocast_enabled:
+                    if autocast_enabled and t_dev.type == dev.type:
                         with torch.autocast(device_type=dev.type, dtype=dtype):
-                            t_out = teacher(input_ids=input_ids, attention_mask=attn_mask)
+                            t_out = teacher(input_ids=t_input_ids, attention_mask=t_attn_mask)
                     else:
-                        t_out = teacher(input_ids=input_ids, attention_mask=attn_mask)
+                        t_out = teacher(input_ids=t_input_ids, attention_mask=t_attn_mask)
                     t_logits = t_out.logits if hasattr(t_out, "logits") else t_out
+                    if t_logits.device != dev:
+                        t_logits = t_logits.to(dev)
 
                 if autocast_enabled:
                     with torch.autocast(device_type=dev.type, dtype=dtype):
-                        s_out = student(input_ids=input_ids, attention_mask=attn_mask)
+                        s_out = student(input_ids=s_input_ids, attention_mask=s_attn_mask)
                         s_logits = s_out.logits if hasattr(s_out, "logits") else s_out
-                        loss = _kl_loss(s_logits, t_logits, attn_mask, kl_temperature)
+                        loss = _kl_loss(s_logits, t_logits, s_attn_mask, kl_temperature)
                 else:
-                    s_out = student(input_ids=input_ids, attention_mask=attn_mask)
+                    s_out = student(input_ids=s_input_ids, attention_mask=s_attn_mask)
                     s_logits = s_out.logits if hasattr(s_out, "logits") else s_out
-                    loss = _kl_loss(s_logits, t_logits, attn_mask, kl_temperature)
+                    loss = _kl_loss(s_logits, t_logits, s_attn_mask, kl_temperature)
 
                 (loss / grad_accum).backward()
                 accum_loss += loss.detach().float().item()
