@@ -117,13 +117,49 @@ already meets the spec target.
 ## Phases
 
 ### Phase A — Activation cache extraction
-1. Acquire Qwen3.6-35B-A3B-Q4_K_M (HF download, ~17 GB).
-2. Patch llama.cpp to dump hidden states at chosen layer indices to
-   disk. Chosen indices: distribute 12 evenly across 48 layers (every
-   4th). Re-use the existing eval-prompt corpus from FineWeb-Edu
-   sample.
-3. Run inference over 100K–1M tokens, dumping `(in_hidden,
-   out_hidden)` pairs at each swap position.
+1. ✓ Acquired **Qwen3.6-27B-Q4_K_M** at
+   `/home/raz/models/Qwen3.6-27B-Q4_K_M/Qwen3.6-27B-Q4_K_M.gguf`
+   (16.82 GB on disk, BPW 5.00, Unsloth-quantized with imatrix).
+   Architecture is `LLM_ARCH_QWEN35` (NEW arch, recently added to
+   mainline llama.cpp; the older Feb-built llama.cpp at
+   `~/llama.cpp/build/` does NOT support it — must use
+   `/tmp/llama-mainline/build/bin/llama-cli` only).
+
+   Verified shape (from llama_model_loader print_info):
+   - 64 layers, n_embd=5120, n_ff=17408
+   - GQA: n_head=24, n_head_kv=4 (n_gqa=6)
+   - **Hybrid attention/SSM** with `full_attention_interval=4`:
+     **only every 4th layer is full attention + standard FFN** (16 of
+     64). The other 48 layers are SSM/Mamba-like with
+     `state_size=128, inner_size=6144, conv_kernel=4`.
+   - n_vocab=248,320 (vs Qwen3's 152K); embedding ~2.4 GiB Q4
+   - n_ctx_train=262,144 (256K)
+   - Multimodal base (`Qwen3_5ForConditionalGeneration`,
+     `image-text-to-text`) — text-only inference doesn't load
+     `mmproj-*.gguf`, ignore.
+   - BOS=`<|endoftext|>` (248044), EOS=`<|im_end|>` (248046)
+
+   **Cube-memory swap implication**: only the 16 attention+FFN layers
+   are swap candidates. Indices to swap (every 8th of the 16): layer
+   positions {3, 11, 19, 27, 35, 43, 51, 59}. 8 swap positions, not
+   8 of 64. Activation cache size unchanged: 8 × 100K × 5120 × 2 =
+   **8 GB per side, 16 GB total**.
+
+   **Baseline perf at -ngl 30**: PP 2.8 t/s, TG 0.3 t/s (terrible —
+   only 8 GiB of 16 GB VRAM used; half layers ran on CPU through
+   swap pressure). Per Phase 0 of the tok/s pivot: -ngl sweep is
+   the immediate lever.
+2. Patch llama.cpp with a new tool `tools/dump-activations` that
+   registers a `cb()` callback at `llm_graph_context::cb()` and, for
+   tensor name `ffn_inp` or `ffn_out` AND `il ∈ {chosen layer indices}`,
+   schedules `ggml_backend_tensor_get` after compute and writes bf16
+   to `~/cube-memory-cache/activations/layer_{il}_{in|out}/chunk_{N}.bin`.
+   Chosen indices: every 8th of 64 = 8 swap positions (`{7, 15, 23,
+   31, 39, 47, 55, 63}`). 8 positions × 100K tokens × 5120 hidden ×
+   2 bytes = 16 GB total cache. Fits NVMe.
+3. Run the tool over 100K-1M FineWeb-Edu sample tokens. Native
+   llama.cpp speed on Strix Point ≈ 38 t/s, so 100K tokens ≈ 45 min,
+   1M tokens ≈ 7.5 hours.
 
 ### Phase B — Per-layer fit
 4. For each swap position (sequentially, in layer order):
