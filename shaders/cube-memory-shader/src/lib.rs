@@ -43,6 +43,12 @@ fn cmul(a: Vec2, b: Vec2) -> Vec2 {
     )
 }
 
+/// Complex conjugate. `(re, im) -> (re, -im)`.
+#[inline]
+fn cconj(z: Vec2) -> Vec2 {
+    Vec2::new(z.x, -z.y)
+}
+
 /// FHRR bind kernel.
 ///
 /// Layout:
@@ -65,4 +71,33 @@ pub fn fhrr_bind(
         return;
     }
     out[i as usize] = cmul(in_a[i as usize], in_b[i as usize]);
+}
+
+/// FHRR unbind kernel.
+///
+/// `unbind(z, key) = z * conj(key)`. For unit-modulus keys this is the
+/// inverse of `bind`: `unbind(bind(a, b), b) ≈ a + noise`. Reuses
+/// `FhrrBindPushConsts` since the layout is identical (n complex pairs
+/// in, n complex out).
+///
+/// Layout:
+///   binding=0  in_z:    &[Vec2; n]    bound vector
+///   binding=1  in_key:  &[Vec2; n]    role key to unbind by
+///   binding=2  out:     &mut [Vec2; n]
+///   push       FhrrBindPushConsts
+///
+/// Dispatch the same as fhrr_bind: ceil(n / 64) workgroups in x.
+#[spirv(compute(threads(64)))]
+pub fn fhrr_unbind(
+    #[spirv(global_invocation_id)] gid: UVec3,
+    #[spirv(push_constant)] pc: &FhrrBindPushConsts,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] in_z: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] in_key: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] out: &mut [Vec2],
+) {
+    let i = gid.x;
+    if i >= pc.n {
+        return;
+    }
+    out[i as usize] = cmul(in_z[i as usize], cconj(in_key[i as usize]));
 }
