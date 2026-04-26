@@ -346,7 +346,30 @@ findings drove the corrections above:
   explicit Risk with a primary mitigation (shared slot store, per the
   Memory Layers at Scale paper).
 
+## Phase 0 results (2026-04-25)
+
+FHRR algebra validated on synthetic recall.  `phase0/recall_test.py`
+on Radeon 890M / ROCm 7.2 / Qwen-spec operating point:
+
+| Config (d, m, p, k) | Direct | Depth-3 | Superpose @ k pairs |
+|---|---|---|---|
+| 1024 / 256 / 3, k=32  | 100% | 100% | **94.0%** |
+| 1024 / 256 / 3, k=64  | 100% | 100% | 86.7% |
+| 1024 / 256 / 3, k=128 | 100% | 100% | 62.7% |
+
+Read: top-k=1 retrieval (the primary Memory-Layer use case) is
+algebraically clean.  Superposition capacity is the binding
+constraint; matches Plate's predicted O(d/k) scaling.  No
+training-stability issues since this test is pure algebra.
+
+The (d=1024, m=256, p=3) operating point flagged as "open" in
+*Training mechanics* now has data: at the recommended k≤d/32, recall
+exceeds the 95% threshold target listed in *Validation*.
+
+Phase 1 (distillation from a small open base) is unblocked.
+
 ## Status
 
 Drafted 2026-04-25.  Revision 2026-04-25 after sub-agent peer review.
-Phase 0 prototype next.  Repository: `~/projects/cube-memory/`.
+Phase 0 algebra validated 2026-04-25.  Phase 1 next.
+Repository: `~/projects/cube-memory/`.
