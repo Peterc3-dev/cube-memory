@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "cube-memory-shader",
+    "cube-memory-shader-builder",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# rust-gpu requires a specific nightly toolchain. Pinned in
+# rust-toolchain.toml at the workspace root. Run `rustup show` from
+# this directory to confirm the right toolchain is active.
+[workspace.dependencies]
+spirv-std = { version = "0.9", default-features = false }
+spirv-builder = { version = "0.9", default-features = false }

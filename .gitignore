@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 *.pt
 *.gguf
+shaders/target/
+shaders/Cargo.lock

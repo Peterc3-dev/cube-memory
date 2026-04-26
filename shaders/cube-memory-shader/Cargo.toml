@@ -1,0 +1,15 @@
+[package]
+name = "cube-memory-shader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# rust-gpu requires the shader crate to be a dylib so the
+# SPIR-V codegen backend can produce a single artifact. Do not
+# change to rlib — the build will compile but the output will not
+# be a SPIR-V module.
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+spirv-std.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "cube-memory-shader-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Host crate that drives spirv-builder to compile the shader to
+# a SPIR-V binary. Run with `cargo run -p cube-memory-shader-builder
+# --release`. Output lands at ../target/spirv-unknown-vulkan1.2/
+# release/cube-memory-shader.spv (or similar; the exact path is
+# printed at the end of the run).
+
+[dependencies]
+spirv-builder.workspace = true

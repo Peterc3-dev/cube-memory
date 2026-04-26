@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned to match rust-gpu 0.9 expected nightly. Bump when updating
+# the spirv-std / spirv-builder versions in Cargo.toml; mismatches
+# produce confusing rustc panics inside the SPIR-V codegen backend.
+channel = "nightly-2024-11-22"
+components = ["rust-src", "rustc-dev", "llvm-tools-preview"]
