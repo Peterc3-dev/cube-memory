@@ -171,6 +171,58 @@ push expert counts up (Qwen3-Next, Qwen4 are likely 256+), this
 becomes more acute. Fixing it once for the `mul_mat_id` path
 benefits every Vulkan MoE deployment going forward.
 
+## Implementation attempt note (2026-04-25)
+
+Started a PoC on a `cube-memory-sparse-mul-mat-id` branch off
+mainline `9725a31`. Stopped before completion. The realization:
+
+The naive Option A pattern — *dispatch per expert with z=1, looped
+on the host* — does NOT save workgroups. If `n_as=256` and we
+dispatch 256 times each `{ m, nei1, 1 }`, we still launch
+`256·m·nei1` workgroups total. The only difference is splitting
+one host-side `vkCmdDispatch` call into 256, which is a small
+regression in command-buffer build cost, not a win.
+
+The actual win requires *skipping* dispatches for inactive
+experts. To know which are inactive, we must consult
+`expert_count_buf` (already computed by the `count_experts`
+kernel earlier in the same submission). Three viable paths,
+in increasing implementation complexity:
+
+1. **Host-readback gate (UMA only).**  After `count_experts`,
+   `ggml_vk_sync_buffers` then copy `expert_count_buf` to host RAM,
+   build the active-expert vector, dispatch only for actives via
+   `vkCmdDispatchBase(baseZ=expert_id)`. Breaks pipelining (sync
+   barrier in the middle of the graph). On UMA the readback is a
+   same-DRAM memcpy and the sync point is the dominant cost. On
+   dGPU the readback is a PCIe roundtrip and almost certainly
+   regresses. Estimate: ~150 LOC including a UMA gate.
+
+2. **vkCmdDispatchIndirect.** Add a kernel that transforms
+   `expert_count_buf` into a buffer of `VkDispatchIndirectCommand`
+   structs (one per expert, with Z=count>0?1:0). Replace the
+   single dispatch with `n_as` `vkCmdDispatchIndirect` calls,
+   each pointing at its own offset. The GPU consumes the count
+   at command time so no sync needed; the GPU itself decides not
+   to launch workgroups for experts with Z=0. Estimate: ~300 LOC
+   spread across a new shader, ggml-vulkan dispatch helper, and
+   the matmul-id call site.
+
+3. **Remap-table + shader change.** Add a small "build active
+   expert list" kernel that produces a sorted list of active
+   expert indices into a buffer (size `top_k * batch` worst case).
+   Modify `mul_mm.comp` to read the actual expert id from this
+   list at index `gl_WorkGroupID.z`, instead of using
+   `gl_WorkGroupID.z` directly. Dispatch `{ m, nei1, n_active }`.
+   Cleanest GPU-side path, no readback ever. Estimate: ~400 LOC
+   spread across helper kernel, shader, and call site, plus
+   the indirect-count inference for the dispatch dimensions.
+
+The right PR is path 2 or 3, not Option A as originally written.
+Option A as a *concept* (only-active-experts dispatch) is correct;
+the *mechanism* is not "host loop with dispatchBase," it's GPU-side
+dispatch shape control via indirect or remap-table.
+
 ## Bug-sweep audit (2026-04-25)
 
 A read-only audit on clean context confirmed all technical claims:
