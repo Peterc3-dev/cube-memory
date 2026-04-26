@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use spirv_builder::{MetadataPrintout, SpirvBuilder, SpirvMetadata};
+use spirv_builder::{SpirvBuilder, SpirvMetadata};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Workspace-relative path to the shader crate.
@@ -21,7 +21,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .release(true)
         .multimodule(false)
         .spirv_metadata(SpirvMetadata::Full)
-        .print_metadata(MetadataPrintout::DependencyOnly)
         .build()?;
 
     let spv = result.module.unwrap_single();

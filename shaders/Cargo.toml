@@ -14,5 +14,9 @@ license = "MIT"
 # rust-toolchain.toml at the workspace root. Run `rustup show` from
 # this directory to confirm the right toolchain is active.
 [workspace.dependencies]
-spirv-std = { version = "0.9", default-features = false }
-spirv-builder = { version = "0.9", default-features = false }
+# Tracking the current Rust-GPU/rust-gpu canonical release. The 0.9 line
+# from 2023 (Embark era) is too old — its pinned nightly predates edition2024
+# stabilization, breaking on transitive deps that adopted the 2024 edition.
+# The Rust-GPU org took over and ships 0.10.0-alpha as of April 2026.
+spirv-std = "=0.10.0-alpha.1"
+spirv-builder = { version = "=0.10.0-alpha.1", default-features = false, features = ["use-installed-tools"] }

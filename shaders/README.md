@@ -26,12 +26,19 @@ SPIR-V binaries that the C++ side loads via `vkCreateShaderModule`.
 ## Building
 
 Requires a specific Rust nightly toolchain pinned in
-`rust-toolchain.toml`. Install once:
+`rust-toolchain.toml`. The pin tracks Rust-GPU/rust-gpu's HEAD
+toolchain. Install once:
 
 ```bash
-rustup install nightly-2024-11-22
-rustup component add rust-src rustc-dev llvm-tools-preview \
-    --toolchain nightly-2024-11-22
+rustup install nightly-2026-04-11 \
+    --component rust-src --component rustc-dev --component llvm-tools
+```
+
+System dep (saves ~3 minutes on first build vs the bundled
+`use-compiled-tools` feature):
+
+```bash
+sudo pacman -S spirv-tools     # CachyOS / Arch
 ```
 
 Then:
@@ -41,9 +48,9 @@ cd ~/projects/cube-memory/shaders
 cargo run -p cube-memory-shader-builder --release
 ```
 
-On success the path to the produced SPIR-V file is printed; you can
-also find it under
-`target/spirv-unknown-vulkan1.2/release/cube-memory-shader.spv`.
+On success the path to the produced SPIR-V file is printed. Actual
+location:
+`target/spirv-builder/spirv-unknown-vulkan1.2/release/deps/cube_memory_shader.spv`.
 
 If the build fails with a panic inside the SPIR-V codegen backend,
 check that the toolchain in `rust-toolchain.toml` matches the one
