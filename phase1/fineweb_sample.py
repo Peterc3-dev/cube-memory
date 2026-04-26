@@ -90,22 +90,26 @@ def sample(
             logger.warning("FineWeb stream failed (%s); falling back to local .md", e)
             source = iter(_gather_local_fallback())
 
-    with out_path.open("w", encoding="utf-8") as f:
+    # Atomic write: SIGKILL or OOM mid-stream must not leave a half-file
+    # that the next llama-dump-activations call silently consumes.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    n_docs = 0
+    with tmp_path.open("w", encoding="utf-8") as f:
         for text in source:
-            # Newlines inside a document break the one-doc-per-line invariant.
             line = text.replace("\n", " ").replace("\r", " ")
-            # Count tokens with the Qwen3 tokenizer.
             ids = tokenizer.encode(line, add_special_tokens=False)
             n_tokens += len(ids)
             f.write(line + "\n")
-            docs.append(line)
-            bytes_written += len(line.encode("utf-8")) + 1  # +1 for newline
+            n_docs += 1
+            bytes_written += len(line.encode("utf-8")) + 1
             if n_tokens >= target_tokens:
                 break
+    import os as _os
+    _os.replace(tmp_path, out_path)
 
     return {
         "bytes_written": bytes_written,
-        "doc_count": len(docs),
+        "doc_count": n_docs,
         "token_count": n_tokens,
         "out_path": str(out_path),
     }

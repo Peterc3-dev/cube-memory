@@ -73,14 +73,17 @@ def main() -> int:
 
         out_path = scratch / "trained" / f"layer_{layer}.safetensors"
 
-        # Run trainer for 100 steps. Tiny CubeMemoryLayer to keep it fast.
+        # 100 steps gives ~7% loss reduction on this synthetic problem
+        # (cube-memory's STE-through-cleanup limits convergence speed at
+        # tiny capacity m=8/p=2/n_slots=128). 5% is the noise floor we
+        # need to clear to prove gradients flow at all.
         metrics = train(
             activations_dir=act_dir,
             layer=layer,
             output=out_path,
             steps=100,
             batch_size=16,
-            lr=1e-2,         # bumped for short-horizon test
+            lr=1e-2,
             seed=42,
             d_in=d_in,
             d_codebook=32,
@@ -100,8 +103,12 @@ def main() -> int:
         print(f"initial_train_mse = {initial:.6f}")
         print(f"final_train_mse   = {final:.6f}")
 
-        assert final < initial, (
-            f"loss did not decrease: initial={initial:.6f}, final={final:.6f}"
+        # Out_proj is zero-init so initial loss is mean(y**2)~0.4 (not 1.0
+        # — y is tanh-squashed). 5% reduction in 100 steps is the
+        # achievable signal here; tighter bars need more steps or higher
+        # capacity, both worse trade-offs for unit-test speed.
+        assert final < 0.95 * initial, (
+            f"loss did not descend 5%: initial={initial:.6f}, final={final:.6f}"
         )
         print(f"PASS  loss descended {initial:.6f} -> {final:.6f} in 100 steps")
 
@@ -110,6 +117,25 @@ def main() -> int:
         loaded = load_file(str(out_path))
         assert len(loaded) > 0, "loaded state_dict is empty"
         print(f"PASS  safetensors reloadable, {len(loaded)} tensors")
+
+        # Round-trip: load_layer reconstructs CubeMemoryLayer from the
+        # safetensors checkpoint with .real/.imag merge + ctor-from-meta.
+        # Catches: missing keys, wrong dtype, shape mismatch, complex
+        # buffer not recombined.
+        from per_layer_trainer import load_layer
+        torch.manual_seed(0)
+        a = load_layer(out_path).eval()
+        b = load_layer(out_path).eval()
+        x_probe = torch.randn(1, 8, d_in)
+        ya = a(x_probe)
+        yb = b(x_probe)
+        assert torch.allclose(ya, yb, atol=1e-6), (
+            f"two load_layer calls disagree: max diff={(ya-yb).abs().max():.2e}"
+        )
+        # Sanity: at least one complex codebook buffer was reconstructed.
+        complex_bufs = [k for k, v in a.state_dict().items() if torch.is_complex(v)]
+        assert complex_bufs, "load_layer didn't recombine any complex buffers"
+        print(f"PASS  load_layer round-trip ({len(complex_bufs)} complex buffers reconstructed)")
 
         return 0
     finally:

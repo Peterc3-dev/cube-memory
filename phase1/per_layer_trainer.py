@@ -30,7 +30,7 @@ import struct
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -143,8 +143,12 @@ def train(
 
     optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
-    x_in = x_in.to(device)
-    x_out = x_out.to(device)
+    # Keep x_in/x_out on CPU; only move per-batch tensors to device.
+    # At Qwen3.6-27B scale (5120 dim × 100k tokens × 2 sides × 4 bytes
+    # = ~4 GB per layer per side) the full residual stream blows the
+    # 16 GB VRAM budget when pinned to GPU.
+    x_in = x_in.cpu().pin_memory() if device != "cpu" else x_in
+    x_out = x_out.cpu().pin_memory() if device != "cpu" else x_out
 
     rng = torch.Generator(device="cpu").manual_seed(seed + 1)
 
@@ -161,8 +165,8 @@ def train(
                 0, train_idx.numel(), (batch_size,), generator=rng
             )
         ]
-        batch_in = x_in[idx].unsqueeze(0)   # (1, B, D)
-        batch_out = x_out[idx].unsqueeze(0)  # (1, B, D)
+        batch_in = x_in[idx].unsqueeze(0).to(device, non_blocking=True)
+        batch_out = x_out[idx].unsqueeze(0).to(device, non_blocking=True)
 
         optim.zero_grad()
         pred = model(batch_in)
@@ -180,10 +184,21 @@ def train(
         if val_every > 0 and (step % val_every == 0 or step == steps - 1):
             model.eval()
             with torch.no_grad():
-                v_in = x_in[val_idx].unsqueeze(0)
-                v_out = x_out[val_idx].unsqueeze(0)
-                v_pred = model(v_in)
-                v_loss = F.mse_loss(v_pred, v_out).item()
+                v_in_full = x_in[val_idx]
+                v_out_full = x_out[val_idx]
+                # Batched val to bound peak VRAM at production scale
+                # (n_val × d_in × top_k × n_slots intermediates compound).
+                acc, n_seen = 0.0, 0
+                for vb_in, vb_out in zip(
+                    v_in_full.split(batch_size),
+                    v_out_full.split(batch_size),
+                ):
+                    vb_in = vb_in.unsqueeze(0).to(device, non_blocking=True)
+                    vb_out = vb_out.unsqueeze(0).to(device, non_blocking=True)
+                    vp = model(vb_in)
+                    acc += F.mse_loss(vp, vb_out, reduction="sum").item()
+                    n_seen += vb_in.numel()
+                v_loss = acc / max(n_seen, 1)
             val_loss_history.append((step, v_loss))
             logger.info("step %5d  val_mse=%.6f", step, v_loss)
             model.train()
@@ -226,6 +241,41 @@ def train(
         "n_train": int(train_idx.numel()),
         "n_val": int(val_idx.numel()),
     }
+
+
+def load_layer(path: Path) -> "CubeMemoryLayer":
+    """Inverse of the save path: reconstruct CubeMemoryLayer from a
+    safetensors checkpoint, recombining `.real`/`.imag` keys back into
+    the complex codebook buffers and reading hyperparams from metadata.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from cube_memory_layer import CubeMemoryLayer
+    from safetensors.torch import load_file, safe_open
+
+    with safe_open(str(path), framework="pt") as f:
+        meta = dict(f.metadata() or {})
+    raw = load_file(str(path))
+
+    merged: Dict[str, torch.Tensor] = {}
+    bases = {k[: -len(".real")] for k in raw if k.endswith(".real")}
+    for b in bases:
+        merged[b] = torch.complex(raw[f"{b}.real"], raw[f"{b}.imag"])
+    for k, v in raw.items():
+        if not (k.endswith(".real") or k.endswith(".imag")):
+            merged[k] = v
+
+    model = CubeMemoryLayer(
+        d_in=int(meta["d_in"]),
+        d_codebook=int(meta["d_codebook"]),
+        d_value=int(meta["d_value"]),
+        m=int(meta["m"]),
+        p=int(meta["p"]),
+        n_slots=int(meta["n_slots"]),
+        top_k=int(meta["top_k"]),
+        seed=int(meta["seed"]),
+    )
+    model.load_state_dict(merged, strict=True)
+    return model
 
 
 def main():
