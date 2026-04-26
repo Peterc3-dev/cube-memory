@@ -38,24 +38,48 @@ hardware is not the bottleneck — the launch path is.
 
 Two viable approaches.
 
-### Option A — host-side dispatch loop (smallest blast radius)
+### Option A — host-side dispatch loop with vkCmdDispatchBase
 
-Replace the single dispatch over `{ m, nei1, n_as }` with one
-dispatch per *selected* expert over `{ m, nei1, 1 }`. The host
-already has the routing tensor (`ids`) before this call; iterate
-over selected expert ids and emit `top_k` dispatches.
+The shader reads `expert_idx = gl_WorkGroupID.z` (line 144 of
+`mul_mm.comp`) and uses it both to index the expert weight slab
+(`expert_idx * batch_stride_a`, line 241) and to filter the row id
+list (line 215 of `mul_mm.comp`, lines 16/44/62 of
+`mul_mm_id_funcs.glsl`). Per-expert dispatching with z=1 starting
+from a base of zero would make every dispatch see `expert_idx = 0`,
+which is wrong.
+
+The fix is `vkCmdDispatchBase(baseX=0, baseY=0, baseZ=expert_id,
+groupCountX=m, groupCountY=nei1, groupCountZ=1)`. The shader's
+`gl_WorkGroupID.z` then sees the expert id at no shader cost.
+
+Implementation requires a small change to `ggml_vk_dispatch_pipeline`
+(line 6603) to expose a base-z parameter, OR a parallel function
+`ggml_vk_dispatch_pipeline_base()` for sites that need it.
+`ggml_vk_dispatch_pipeline` currently calls `buf.dispatch(wg0, wg1,
+wg2)` (line 6631); the new path calls `buf.dispatchBase(0, 0,
+baseZ, wg0, wg1, 1)`.
+
+This requires the device feature `VK_KHR_device_group` or core 1.1
+`vkCmdDispatchBase` to be enabled. Both are widely supported and
+likely already enabled in mainline; verify before committing.
 
 Pros:
-- No shader changes.
-- Trivially correct.
-- Roughly halves dispatch overhead at top_k=8 / n_as=128, ~3.5×
-  reduction at top_k=8 / n_as=256.
+- Zero shader changes — the existing `gl_WorkGroupID.z` semantics
+  preserved.
+- Per-call dispatch overhead drops from `n_as` workgroups to
+  `top_k` workgroups (active experts × dispatch calls).
+- At Qwen3.6 TG (batch=1, top_k=8, n_as=256) we go from 256
+  workgroups to ~8, not all 256 of which were idle but a
+  substantial majority — expected ~25–30% TG win.
 
 Cons:
 - N small dispatches instead of 1 large one — Vulkan command-buffer
-  build cost scales with dispatch count, may eat some of the win.
-- Requires reading `ids` host-side, which on Vulkan UMA is cheap
-  but on a real PCIe GPU is a roundtrip.
+  build cost scales with dispatch count.
+- Requires reading `ids` host-side to build the list of active
+  experts. On UMA this is a memcpy from same DRAM. On dGPU it is a
+  PCIe roundtrip.
+- At PP (large batch), most experts are active anyway, so the win
+  on prompt processing is small; this is a TG-side fix.
 
 ### Option B — vkCmdDispatchIndirect with expert_count_buf
 
