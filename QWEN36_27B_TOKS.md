@@ -60,3 +60,71 @@ Practically: **`-ngl 64 -t 8`** is the recommended setting (within noise of t10,
 - `-ot none` is **not** a valid argument (`-ot` requires `pattern=buffertype`). llama-bench silently dumps `--help` instead of erroring with a clear message — minor UX issue, just omit `-ot`.
 - **System RAM pressure is the real ceiling on this hardware.** At any partial offload the system thrashes zram and TG collapses by ~20x. Recommendation: never run this model below ngl=64 on this box. If we ever need a 30B+ model that doesn't fit in 16 GiB VRAM, we need to either (a) free more system RAM first, (b) use a smaller quant (Q3_K_M is ~13 GiB), or (c) move that work to the M70q hub.
 - **GPU was in low-power state at session start** ("AMD GPU device(s) is/are in a low-power state. Check power control/runtime_status" warning from rocm-smi). It woke up fine for the bench, but if energy/perf becomes a knob worth turning, look at `/sys/class/drm/card*/device/power_dpm_force_performance_level`.
+
+## Iteration 4 — KV cache q8_0 quant (2026-04-26)
+
+### Pre-flight
+`pgrep -af 'llama-'` clean. iGPU idle post Iteration 3 sweep + Phase A activation-dump smoke test.
+
+### Setup quirk: q8_0 KV requires flash-attn on RADV STRIX1
+First attempt with `-ctk q8_0 -ctv q8_0 --flash-attn 0` errored with `failed to create context with model` (no further diagnostic from llama-bench). Re-run with `--flash-attn 1` succeeded immediately. Flash-attn is therefore mandatory for quantized KV on this Vulkan/RADV path — the Iteration 3 baseline (FA=0) is no longer apples-to-apples, so a fresh fp16+FA baseline was captured below.
+
+### vs baseline (-ngl 64 -t 8 -p 256 -n 64 -r 2, --flash-attn 1)
+
+| KV type | PP (t/s) | TG (t/s) | Δ vs fp16+FA |
+|---|---|---|---|
+| fp16 (FA=1, baseline)  | 92.55 ± 0.61 | 5.38 ± 0.00 | — |
+| q8_0 (FA=1)            | 88.29 ± 0.24 | 5.36 ± 0.02 | PP -4.6%, TG -0.4% (flat) |
+
+For reference, original Iteration-3 fp16+FA=0 baseline was PP 92.04 / TG 5.36. Enabling FA alone bought ~0.5% PP and is essentially free at this context.
+
+### Verdict
+**Skip for now** — KV q8_0 is a small PP regression and a flat TG result. No bandwidth win materialised on RADV STRIX1; the q8_0 dequant cost in the attention kernel cancels out the cache-size saving at ctx=512. The one residual benefit is roughly half KV memory (~16 MB → ~8 MB at ctx=512), which only matters once we push into long-context territory. Re-evaluate at ctx≥8192 where KV pressure actually bites.
+
+### Notes
+- No DEVICE_LOST, no validation warnings, no slow load (mmap'd from page cache after Iteration 3).
+- The FA=0 + q8_0 KV failure mode is a llama.cpp / RADV combination bug worth filing if reproducible upstream — it should at least error with a meaningful message instead of a bare `failed to create context`.
+
+## Iteration 6 — Speculative decoding draft model: vocab-mismatch abort (2026-04-26)
+
+### Pre-flight
+`pgrep -af 'llama-'` clean. iGPU idle post Iteration 5.
+
+### Draft model acquired
+- Source: `unsloth/Qwen3-1.7B-GGUF` (HF cache had Q4_0 only; Q4_K_M downloaded fresh)
+- Path: `/home/raz/models/Qwen3-1.7B-Q4_K_M/Qwen3-1.7B-Q4_K_M.gguf` (1.1 GB / 1,107,409,472 bytes)
+- Load test: clean — PP 243.6 t/s, TG 78.7 t/s on Vulkan (-ngl 99), no errors
+- Build: b14-a6af0ff (mainline)
+
+### Vocab compatibility check (the gating question from Iter-3 next-step #4)
+
+| Model | n_vocab | vocab type |
+|---|---|---|
+| Qwen3-1.7B-Q4_K_M (draft candidate) | **151,936** | BPE |
+| Qwen3.6-27B-Q4_K_M (target)         | **248,320** | BPE |
+
+**Mismatch confirmed.** Qwen3.6 expanded the tokenizer to 248K (presumably to accommodate the qwen35 hybrid-arch additions / extended multilingual / vision-pad tokens visible in its embedded jinja template). Qwen3 series stayed at the original 151,936-token Qwen2 vocab.
+
+### Verdict: speculative decoding is non-viable for Qwen3.6-27B on this stack
+
+llama.cpp's speculative decoder requires the draft and target models to share an identical tokenizer (same vocab size, same token IDs, same merges) — token IDs proposed by the draft are accepted/rejected against the target's logits at the same position, which is meaningless if the IDs reference different vocab entries. There is no remap path in llama-speculative.
+
+### Options (none of which are pursued in this iteration)
+1. **Wait for a small qwen35-vocab model.** Realistic candidates would be a Qwen3.6-0.5B / Qwen3.6-1.5B class drop. Nothing on HF as of 2026-04-26 — Qwen3.6 release set is 27B + 35B-A3B only.
+2. **Train a 0.5B draft from scratch on the 248K vocab.** Tens of GPU-days even on better hardware than gfx1150; out of scope.
+3. **Skip speculative entirely.** Recommended. The other Iter-3 levers (fp16 KV at long context, FFN swap once Phase 2 distill lands) have higher expected payoff per hour invested.
+
+Spec decoding is closed off until option 1 materialises. Removing it from the open-roadmap.
+
+### Bench numbers
+None — aborted at the vocab check. ~30 s of wallclock spent on the load+verbose dumps; no ~17 GB target load attempted.
+
+### llama-server tool-call path (endpoint-prep, not a bench)
+Verified in passing while the GPU was warm:
+- `--jinja` is **on by default** in build b14-a6af0ff.
+- `--tools` flag exists for built-in agent tools (read_file, file_glob_search, grep_search) — opt-in only ("do not enable in untrusted environments").
+- `--reasoning [on|off|auto]` and `--reasoning-format deepseek` available for separating thinking traces into `message.reasoning_content`.
+- `--chat-template-file` accepts a Jinja template; mainline ships `/tmp/llama-mainline/models/templates/Qwen3.5-4B.jinja` which matches the qwen35 family.
+- Qwen3.6-27B GGUF **embeds its own chat template** (kv 44 `tokenizer.chat_template`) — llama-server picks it up automatically. The differential autoparser on the embedded template reports `supports_tools: true`, `tool_mode: TAG_WITH_TAGGED`, `per_call_start: <tool_call>`, `per_call_end: </tool_call>`. Standard Qwen tool-call tagging — drop-in compatible with llama.cpp's OpenAI-shim endpoint.
+
+BFCL-style benches can drive `llama-server` directly with default flags (no `--chat-template-file` needed, no `--jinja` flag needed); the only knob worth setting is `--reasoning-format deepseek` so the harness can route think-traces out of the assistant content.
