@@ -1,0 +1,27 @@
+[package]
+name = "cube-memory-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Host-side parity tests: drive each shader entry point through
+# wgpu compute, run the same algorithm on the CPU, assert outputs
+# are numerically close. Catches GPU/CPU divergence early —
+# essential before plugging the kernels into ggml-vulkan in Phase 2.
+#
+# Built with the *stable* toolchain (this crate is plain Rust, not
+# rust-gpu). cargo will use a non-pinned toolchain for it because
+# rust-toolchain.toml only applies to crates that opt in via
+# build profile.
+
+[dependencies]
+# `spirv` enables SPIRV_SHADER_PASSTHROUGH (loading raw SPIR-V we
+# produced via rust-gpu, no WGSL conversion). Vulkan is the default
+# backend on Linux and doesn't need an explicit feature flag.
+wgpu = { version = "23", features = ["spirv"] }
+bytemuck = { version = "1.18", features = ["derive"] }
+pollster = "0.3"
+glam = { version = "0.32", features = ["bytemuck"] }
+
+[dev-dependencies]
+approx = "0.5"

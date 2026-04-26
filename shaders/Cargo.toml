@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "cube-memory-shader",
     "cube-memory-shader-builder",
+    "cube-memory-host",
 ]
 
 [workspace.package]
