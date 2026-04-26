@@ -56,6 +56,27 @@ def main():
     print(f"PASS  initial out norm = {out.norm().item():.4e}  (should be ~0)")
     print(f"PASS  loss after perturb = {loss.item():.4f}")
 
+    # 4. Multi-step loss-descent check: loss must trend down over a
+    #    handful of steps with a fixed input/target. This catches
+    #    silent gradient-flow regressions that the single-step grad
+    #    presence test cannot detect.
+    layer2 = CubeMemoryLayer(d_in=D, d_codebook=64, d_value=32, m=16, p=3, n_slots=512)
+    layer2.out_proj.weight.data.add_(torch.randn_like(layer2.out_proj.weight) * 1e-2)
+    opt = torch.optim.AdamW(layer2.parameters(), lr=1e-2)
+    losses = []
+    for _ in range(40):
+        opt.zero_grad()
+        loss = (layer2(x) - target).pow(2).mean()
+        loss.backward()
+        opt.step()
+        losses.append(loss.item())
+    # Bar set at 5% descent, not aggressive — this test is a regression
+    # tripwire on gradient flow, not an LR/optimizer convergence test.
+    # Phase 1 distillation will need its own LR sweep.
+    assert losses[-1] < losses[0] * 0.95, \
+        f"loss barely moved in 40 steps: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    print(f"PASS  loss descent {losses[0]:.4f} -> {losses[-1]:.4f} in 40 steps")
+
 
 if __name__ == "__main__":
     main()

@@ -164,7 +164,17 @@ class CubeMemoryLayer(nn.Module):
         cleaned = self._cleanup_per_axis(q_phasor)
         cleaned_ste = q_phasor + (cleaned - q_phasor).detach()
         addr = self._bound_address(cleaned_ste)
-        addr = _unitize_complex(addr)  # mandatory unit-modulus projection
+        # Defensive unit-modulus projection. The product of unit-modulus
+        # phasors is algebraically unit-modulus, so this is a no-op in
+        # exact arithmetic; in fp32/fp16 it bounds float drift that
+        # accumulates across many bind levels and through the STE path.
+        addr = _unitize_complex(addr)
         q_real = self._addr_to_realq(addr)
+        # Sparse top-k retrieval: only the selected slots receive
+        # gradients on this forward pass. This is the standard Memory
+        # Layer training pattern (Berges et al. 2024) — unselected
+        # slots stay at their last-update values, which is fine because
+        # the model learns to *route* hot tokens to slots rather than
+        # update everything densely.
         slot_val = self._retrieve(q_real)
         return self.out_proj(slot_val)
