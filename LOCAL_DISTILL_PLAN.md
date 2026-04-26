@@ -1,5 +1,27 @@
 # Local distillation plan — raz-gpd4 only, no rented compute
 
+## Endpoint (refined 2026-04-26)
+
+**An agent fully capable of tool calling, running 100% on raz-gpd4.**
+
+- **Runtime**: `llama-server` on raz-gpd4 serving Qwen3.6-27B
+  (eventually with cube-memory FFN replacements). No cloud APIs in
+  the agent's hot path. Claude is the builder, not the runtime.
+- **Tool-calling support**: qwen35 chat template + JSON-schema
+  function definitions + structured `<tool_call>` emission
+  parseable by an executor.
+- **Eval bar**: BFCL (Berkeley Function Calling Leaderboard)
+  - Simple ≥ 80% (single function, correct selection)
+  - Multiple ≥ 60% (choose right function from a set)
+  - Parallel + Multi-turn: nice-to-have
+- **Wired**: openclaw (or direct curl harness) routes user queries
+  → local llama-server → tool execution → response. Telegram already
+  hooked into openclaw, so the agent can be reached from the user's
+  phone without any cloud dependency.
+
+The recursive loop does not stop until the above is demonstrated
+end-to-end with measured BFCL numbers committed to the repo.
+
 **Two viable paths, both run end-to-end on raz-gpd4.**
 
 ## Memory model — raz-gpd4 (corrected 2026-04-26)
@@ -151,12 +173,35 @@ already meets the spec target.
    the immediate lever.
 2. Patch llama.cpp with a new tool `tools/dump-activations` that
    registers a `cb()` callback at `llm_graph_context::cb()` and, for
-   tensor name `ffn_inp` or `ffn_out` AND `il ∈ {chosen layer indices}`,
-   schedules `ggml_backend_tensor_get` after compute and writes bf16
-   to `~/cube-memory-cache/activations/layer_{il}_{in|out}/chunk_{N}.bin`.
-   Chosen indices: every 8th of 64 = 8 swap positions (`{7, 15, 23,
-   31, 39, 47, 55, 63}`). 8 positions × 100K tokens × 5120 hidden ×
-   2 bytes = 16 GB total cache. Fits NVMe.
+   tensor name `ffn_inp` or `ffn_out` (or qwen35-equivalent — see
+   note below) AND `il ∈ {chosen layer indices}`, schedules
+   `ggml_backend_tensor_get` after compute and writes bf16 to
+   `~/cube-memory-cache/activations/layer_{il}_{in|out}/chunk_{N}.bin`.
+
+   **Architecture-specific name mapping** (verified 2026-04-26 by
+   reading `src/models/qwen35.cpp` directly — Agent L's recon was
+   wrong about FFN coverage):
+   - **qwen35 has FFN on EVERY layer** (all 64), not just the 16
+     full-attention ones. The hybrid is in the *attention* path
+     (linear/SSM vs full-attn alternates per `full_attention_interval=4`),
+     but `build_layer_ffn(attn_post_norm, il)` runs on every layer.
+     This *increases* the swap candidate pool from 16 → 64.
+   - **qwen35 emits NO `ffn_inp` callback.** Its FFN-input tensor is
+     named `attn_post_norm` (line 57 of qwen35.cpp). The dump tool's
+     filter must accept `attn_post_norm` as the qwen35 equivalent of
+     `ffn_inp`, otherwise the input side of the (in, out) pair is
+     silently dropped and the entire activation cache is unusable
+     for distillation.
+   - **dump-tool patch required** before Phase A can run on
+     Qwen3.6-27B. Tracked as a Phase A blocker. The smoke test on
+     Qwen3-1.7B passed because vanilla qwen3 *does* emit `ffn_inp`
+     — different architecture, different tensor names.
+
+   Updated swap indices for 64-layer Qwen3.6-27B: still every 8th =
+   8 positions ({3, 11, 19, 27, 35, 43, 51, 59}), but now uniformly
+   spaced across all layers since every layer is a candidate.
+   Cache size: 8 positions × 100K tokens × 5120 hidden × 2 bytes ×
+   2 sides = 16 GB total. Fits NVMe.
 3. Run the tool over 100K-1M FineWeb-Edu sample tokens. Native
    llama.cpp speed on Strix Point ≈ 38 t/s, so 100K tokens ≈ 45 min,
    1M tokens ≈ 7.5 hours.
