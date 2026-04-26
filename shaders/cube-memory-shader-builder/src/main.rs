@@ -20,7 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = SpirvBuilder::new(&shader_crate, "spirv-unknown-vulkan1.2")
         .release(true)
         .multimodule(false)
-        .spirv_metadata(SpirvMetadata::Full)
+        // `Full` metadata embeds full Rust source as OpString debug
+        // info — useful for shader debugging but inflates the binary
+        // ~50x. `None` is the right default; switch to `Full` only
+        // when you need to map a SPIR-V crash back to a source line.
+        .spirv_metadata(SpirvMetadata::None)
         .build()?;
 
     let spv = result.module.unwrap_single();

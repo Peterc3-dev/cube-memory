@@ -57,6 +57,16 @@ check that the toolchain in `rust-toolchain.toml` matches the one
 expected by the `spirv-builder` crate version pinned in `Cargo.toml`.
 Mismatches are the most common cause of obscure failures.
 
+### Debug metadata tradeoff
+
+The builder is configured with `SpirvMetadata::None` for ~5 KB output.
+With `SpirvMetadata::Full` the produced binary embeds the full Rust
+source and OpString debug info, ~50× the size (~330 KB). When you
+need to map a SPIR-V validation error or driver crash back to a
+source line, temporarily flip to `Full` in
+`cube-memory-shader-builder/src/main.rs` and rebuild — `spirv-dis`
+output will then include the source spans.
+
 ## Current shaders
 
 ### `fhrr_bind`

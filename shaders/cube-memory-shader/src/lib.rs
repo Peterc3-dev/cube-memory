@@ -31,6 +31,16 @@ pub struct FhrrBindPushConsts {
     pub n: u32,
 }
 
+/// Push constants for `fhrr_superpose`.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct FhrrSuperposePushConsts {
+    /// Number of complex elements per bundled vector.
+    pub n: u32,
+    /// Number of vectors being bundled together.
+    pub k: u32,
+}
+
 /// Element-wise complex multiplication.
 ///
 /// `(a.re + i a.im) * (b.re + i b.im) =
@@ -100,4 +110,71 @@ pub fn fhrr_unbind(
         return;
     }
     out[i as usize] = cmul(in_z[i as usize], cconj(in_key[i as usize]));
+}
+
+/// FHRR unitize kernel.
+///
+/// Element-wise normalize each phasor to unit modulus. After many
+/// bind/unbind compositions the magnitudes drift in fp arithmetic;
+/// this kernel projects them back onto the unit circle. Required
+/// every forward pass per Alam et al. 2021 (arXiv 2109.02157).
+///
+/// Layout:
+///   binding=0  in:  &[Vec2; n]
+///   binding=1  out: &mut [Vec2; n]
+///   push       FhrrBindPushConsts
+///
+/// Dispatch ceil(n / 64) workgroups in x.
+#[spirv(compute(threads(64)))]
+pub fn fhrr_unitize(
+    #[spirv(global_invocation_id)] gid: UVec3,
+    #[spirv(push_constant)] pc: &FhrrBindPushConsts,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] r#in: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] out: &mut [Vec2],
+) {
+    let i = gid.x;
+    if i >= pc.n {
+        return;
+    }
+    let z = r#in[i as usize];
+    // glam's Vec2::length() lowers to the SPIR-V Length GLSL.std.450
+    // intrinsic, which is the right primitive on the GPU. The 1e-8
+    // floor prevents division by zero on degenerate (0, 0) inputs
+    // without perturbing already-unit vectors.
+    let mag = z.length().max(1e-8);
+    out[i as usize] = z / mag;
+}
+
+/// FHRR superpose (bundle) kernel.
+///
+/// Sum K complex vectors element-wise, then unitize. Inputs are laid
+/// out as a single contiguous K*N buffer in row-major order: vector
+/// k starts at offset k*n. This is the bundle operation in VSA.
+///
+/// Layout:
+///   binding=0  in:  &[Vec2; k * n]   stacked input vectors
+///   binding=1  out: &mut [Vec2; n]   bundled + unitized output
+///   push       FhrrSuperposePushConsts
+///
+/// Dispatch ceil(n / 64) workgroups in x. Each thread handles one
+/// element of the output, summing across K bundle slots serially.
+#[spirv(compute(threads(64)))]
+pub fn fhrr_superpose(
+    #[spirv(global_invocation_id)] gid: UVec3,
+    #[spirv(push_constant)] pc: &FhrrSuperposePushConsts,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] r#in: &[Vec2],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] out: &mut [Vec2],
+) {
+    let i = gid.x;
+    if i >= pc.n {
+        return;
+    }
+    let mut acc = Vec2::ZERO;
+    let mut k = 0u32;
+    while k < pc.k {
+        acc += r#in[(k * pc.n + i) as usize];
+        k += 1;
+    }
+    let mag = acc.length().max(1e-8);
+    out[i as usize] = acc / mag;
 }
