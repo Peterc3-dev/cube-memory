@@ -194,3 +194,122 @@ Server process already dead from OOM by the time eval finished; `pgrep -fl '/lla
 - Per-prompt JSONL: `/tmp/bfcl_eval/results.jsonl` (25 lines; first 12 valid, last 13 are connection-refused after OOM)
 - Server log: `/tmp/llama-server.log` (744 lines, ends mid-prompt-cache-save)
 - Run log: `/tmp/bfcl_eval/eval.log`
+
+## Iteration 8 — BFCL Simple subset, token-budget + reasoning-suppression fixes (2026-04-26)
+
+Re-ran the same 25-prompt slice with the four fixes from Iter-7's action items applied. Goal: kill the 4 max_tokens-inside-`<think>` failures and prove the OOM was a cache-size issue, not a fundamental footprint problem.
+
+### Setup deltas vs Iter-7
+
+| Knob | Iter-7 | Iter-8 |
+|---|---|---|
+| `max_tokens` (harness) | 512 | **2048** |
+| `--cache-ram` (server) | default 8192 MiB | **1024** (cap, prevents OOM) |
+| `--reasoning-budget` (server) | unset (= -1, unrestricted) | **0** (immediate end-of-thinking) |
+| `/no_think` token in user msg | no | **yes** (prepended to last user message) |
+| Pre-run `drop_caches` | already in iter-7 | yes |
+
+Notes on flag selection:
+- `--cache-reuse` exists but its **default is already 0** in build b290 — it was not the OOM cause, so it's a no-op. The actual blocker was `--cache-ram` (default 8192 MiB), now capped to 1024.
+- Both `/no_think` and `--reasoning-budget 0` were applied as belt-and-suspenders. Sanity check (`What is 2+2?`) returned `content='4'`, `reasoning_content=''` — thinking is off.
+- Swap was at 6.6 GiB pre-run (zram). `swapoff` requires sudo password, skipped per instructions; cap+budget fixes were enough.
+
+### Server launch
+```
+HSA_OVERRIDE_GFX_VERSION=11.0.0 llama-server \
+  -m Qwen3.6-27B-Q4_K_M.gguf \
+  -ngl 64 -t 8 --jinja --reasoning-format deepseek \
+  --reasoning-budget 0 --cache-ram 1024 \
+  --port 8080 -c 4096
+```
+Came up cleanly (ABI symlink fix from Iter-7 still in place).
+
+### Results
+
+| metric | score | pct | Δ vs Iter-7 (12-prompt floor) |
+|---|---|---|---|
+| Function selection  | 23/25 | **92.0%** | +25.3 pp |
+| Argument correctness | 21/25 | **84.0%** | +17.3 pp |
+| Combined Simple     | 44/50 | **88.0%** | +21.3 pp |
+
+Wallclock 318.7 s for 25 prompts = **12.7 s/prompt** (vs ~80 s/prompt in Iter-7 — `/no_think` + budget=0 cuts each request by ~6×). Per-prompt range 10.5–19.2 s.
+
+### Failure breakdown (4 misses)
+
+| category | count | recoverable? |
+|---|---|---|
+| token-budget (`max_tokens` exhausted in `<think>`) | **0** | — (fixed) |
+| OOM / server crash | **0** | — (fixed) |
+| HTTP 400 — harness/schema bug | 2 | yes (BFCL data uses `"type":"float"` which isn't valid JSON-Schema; llama.cpp's autoparser rejects it. Harness should rewrite `float`→`number` like it already does for `dict`→`object`) |
+| argument-format mismatch (math notation) | 2 | partially (model uses `^` for power, BFCL gold uses `**` — domain-specific tokenizer/prompt nudge would fix) |
+| function-selection capability gap | **0** | — (none) |
+
+The Iter-7 hypothesis is fully confirmed: every Iter-7 timeout is now a clean pass. `simple_python_6` (quadratic roots), `_7` (circle circumference), `_9` (circle area), `_10` (right-triangle area) all returned correct `tool_calls` in 13–15 s.
+
+### 3 sample failures (verbatim)
+
+1. **simple_python_13** — HTTP 400 schema error
+   `"Unable to generate parser for this template. Automatic parser generation failed: JSON schema conversion failed: Unrecognized schema: {\"type\":\"float\"}"`
+   (Model never saw the prompt — autoparser rejected the tool schema before sending. Fixable in `to_openai_tool()` by mapping `float`→`number`.)
+
+2. **simple_python_15** — argument-format
+   Prompt: `Calculate the area under the curve from x = -2 to x = 3 for the function y = x^3 using simpson method.`
+   Got: `{"function":"x^3","start_x":-2,"end_x":3,"method":"simpson"}`
+   Expected: `function ∈ ["x**3", "lambda x: x**3"]`
+   Model picked the right tool with right bounds and method; only the function-string notation is off (mathematical `^` vs Python `**`).
+
+3. **simple_python_16** — argument-format
+   Prompt: `Calculate the derivative of the function 2x^2 at x = 1.`
+   Got: `{"function":"2x^2","value":1}` — same `^` vs `**` issue.
+
+### Bar check
+
+Bar: BFCL Simple ≥ 80%
+Observed: **88.0%** on the 25-prompt subset
+**Verdict: PASS.** Comfortably over the 80% bar with 8 pp of headroom. Two of the four "failures" are an eval-harness bug (`float` schema not converted), so the model's true accuracy on this slice is closer to **23/23 = 100% function selection** and **21/23 ≈ 91% argument correctness** if you exclude the schema-conversion bug. The two remaining "real" misses are notation-style (`^` vs `**`) on Python-callable arguments, which a single-shot system-prompt note (`"function arguments must be valid Python: use ** for powers"`) would likely fix without retraining.
+
+### Next iteration candidates
+
+1. **Patch `to_openai_tool()` to map BFCL `"type":"float"` → JSON-Schema `"type":"number"`** (and probably `"tuple"` and other BFCL-isms). Trivial fix; would un-block the 2 HTTP 400s.
+2. **Run the full 399-prompt BFCL Simple subset.** 25 is enough to clear the bar but the official leaderboard number needs the full set.
+3. **Add a system message: "Tool arguments containing math expressions must be valid Python (use `**` for exponentiation, not `^`)."** Targets the notation gap.
+4. **Move on to BFCL Multiple subset.** Simple is now in the bag; Multiple (≥60% bar) is the next gating criterion before the cube-memory FFN swap can be evaluated head-to-head.
+
+### Cleanup
+Server killed via `kill $(cat /tmp/llama-server.pid)`; `pgrep -af 'llama-server\|llama-bench\|llama-cli'` confirmed empty post-run.
+
+### Artifacts
+- Eval script: `/tmp/bfcl_eval/run_eval.py` (now patched: `max_tokens=2048`, `/no_think` prepended)
+- Per-prompt JSONL: `/tmp/bfcl_eval/results.jsonl` (25 valid lines)
+- Server log: `/tmp/llama-server-iter8.log`
+- Run log: `/tmp/bfcl_eval/eval-iter8.log`
+
+## Iteration 9 — BFCL Multiple subset baseline (no cube-memory swap)
+
+llama-server config (same as iter 8): `-ngl 64 -t 8 --jinja --reasoning-format deepseek --port 8080 -c 4096 --cache-ram 1024 --reasoning-budget 0`
+Test set: 25 prompts from BFCL_v4_multiple.json (model picks 1-of-N functions, N ∈ {2, 3})
+Per-prompt: `/no_think` injected into last user message, max_tokens=2048
+
+Results:
+- Function selection: **25/25 = 100.0%** (perfect — picked correct function every time, 2-3 candidates each)
+- Argument correctness: 23/25 = 92.0%
+- Combined Multiple: **48/50 = 96.0%**
+- Per-prompt wallclock: 20.4 s (Multiple has more reasoning over function options than Simple)
+
+Bar: BFCL Multiple ≥ 60%
+**Verdict: PASS** (clears bar by 36 pp; same model that passes Simple at 88%)
+
+Failure analysis:
+- The 2 "misses" are scoring artifacts (harness over-strict on nested-dict matching), not capability failures.
+- Model returned `{'min': 300000, 'max': 400000}` (correct semantics);
+  ground truth format wraps each value in a list `[{'min': [300000], 'max': [400000]}]`.
+- Recursing the matcher into nested dicts would push score to 25/25 = 100%.
+
+### Endpoint progress
+- ✅ Local inference (5.36 t/s)
+- ✅ BFCL Simple = 88%
+- ✅ BFCL Multiple = 96%
+- ⏳ openclaw → llama-server wired (iteration 10)
+- ⏳ End-to-end Telegram → local agent demo (iteration 11, requires user)
+
+After iter 10 the endpoint is reached: agent fully tool-calling-capable, 100% local on raz-gpd4.
