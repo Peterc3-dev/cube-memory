@@ -59,31 +59,42 @@ been broken; this branch is mergeable as-is for CPU-only use.
 
 ## What's next, in priority order
 
-### 1. Vulkan dispatch path (the big one)
+### 1. Vulkan dispatch path ✓ DONE (2026-04-26)
 
-Wire the rust-gpu SPIR-V at
-`shaders/target/spirv-builder/spirv-unknown-vulkan1.2/release/deps/cube_memory_shader.spv`
-into ggml-vulkan. Tasks:
+The full Rust → SPIR-V → ggml-vulkan dispatch path is wired, working,
+and validated. With `GGML_VK_CUBE_MEMORY_SPV` pointing at the
+rust-gpu .spv, both ops dispatch to the Radeon 890M iGPU and produce
+output matching the CPU reference at fp32 tolerance:
 
-- At backend init, read the .spv (or embed via `xxd -i` at build time).
-- For each entry point name (`cube_memory_cleanup`,
-  `cube_memory_retrieve`), call `ggml_vk_create_pipeline` with the
-  push-constant size and descriptor layout.
-- Add `case GGML_OP_CUBE_MEMORY_CLEANUP:` and `case
-  GGML_OP_CUBE_MEMORY_RETRIEVE:` to the Vulkan
-  `supports_op` switch (return true when shapes match the kernel's
-  expectations).
-- Add corresponding cases to the dispatch site (somewhere around
-  `ggml_vk_build_graph`); set push constants from `op_params`,
-  bind buffers, dispatch the kernel.
-- The host harness in `shaders/cube-memory-host/src/gpu.rs` is the
-  reference for the descriptor-set layout and dispatch shape.
+```
+CUBE_MEMORY_CLEANUP(d=32,m=16):  OK
+CUBE_MEMORY_CLEANUP(d=64,m=32):  OK
+CUBE_MEMORY_CLEANUP(d=128,m=64): OK
+CUBE_MEMORY_RETRIEVE(d_key=16,n_slots=32,d_value=8,top_k=4):  OK
+CUBE_MEMORY_RETRIEVE(d_key=32,n_slots=64,d_value=16,top_k=8): OK
+```
 
-Estimated effort: 2-4 days. Sweep policy says: clean-context
-bug-sweep before each commit; integration sweep when the path is
-end-to-end working.
+VK_LAYER_KHRONOS_validation re-run: zero warnings.
 
-### 2. Round-trip parity test
+One non-trivial bug got caught and fixed during the integration:
+`ggml_vk_create_pipeline` retains its `spv_data` pointer for lazy
+`vkCreateShaderModule`, but the loader was passing a stack-local
+`std::vector<char>` that went out of scope before the module was
+created. Fix: store the bytes on `vk_device_struct` so they share
+the device's RAII lifetime.
+
+Commits on the cube-memory-op branch:
+- `ggml-vulkan: load rust-gpu cube_memory SPIR-V at backend init`
+- `ggml-vulkan: wire CUBE_MEMORY supports_op + dispatch (segfault pending)`
+- `ggml-vulkan: fix CUBE_MEMORY SPV lifetime — store bytes on device`
+
+### 2. Round-trip parity test ✓ DONE (2026-04-26)
+
+Both ops have Python NumPy ↔ ggml CPU round-trip parity tests
+passing. See `phase1/export_*_test_case.py` and the corresponding
+`tests/test-cube-memory-*-roundtrip.cpp` in the llama.cpp branch.
+
+### 3. (was 4) Round-trip parity test
 
 PyTorch `CubeMemoryLayer.forward(x)` → export weights to GGUF →
 load in ggml → ggml graph forward on the same `x` → compare outputs.
@@ -102,7 +113,7 @@ Two halves:
   it on a fixed input, comparing to the PyTorch reference baked
   into the GGUF as a "gold output" tensor.
 
-### 3. Performance pass on the CPU implementations
+### 4. Performance pass on the CPU implementations
 
 Currently both CPU forwards are single-threaded (`n_tasks=1`).
 They need to be parallelized once the algorithm is correct:
@@ -114,7 +125,7 @@ They need to be parallelized once the algorithm is correct:
 This is needed for any real distillation eval that runs on CPU
 fallback.
 
-### 4. Vulkan shader hardening
+### 5. Vulkan shader hardening
 
 The rust-gpu shaders have `cube_memory_cleanup` and
 `cube_memory_retrieve` as single-thread workgroups (workgroup size
