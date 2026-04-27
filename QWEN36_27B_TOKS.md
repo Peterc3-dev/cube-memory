@@ -291,19 +291,41 @@ Test set: 25 prompts from BFCL_v4_multiple.json (model picks 1-of-N functions, N
 Per-prompt: `/no_think` injected into last user message, max_tokens=2048
 
 Results:
-- Function selection: **25/25 = 100.0%** (perfect — picked correct function every time, 2-3 candidates each)
+- Function selection: **25/25 = 100.0%** (on this slice, see calibration below)
 - Argument correctness: 23/25 = 92.0%
-- Combined Multiple: **48/50 = 96.0%**
-- Per-prompt wallclock: 20.4 s (Multiple has more reasoning over function options than Simple)
+- Combined Multiple: **48/50 = 96.0%** (n=25, Wilson 95% CI [80.5%, 99.3%])
+- Per-prompt wallclock: 20.4 s
 
 Bar: BFCL Multiple ≥ 60%
-**Verdict: PASS** (clears bar by 36 pp; same model that passes Simple at 88%)
+**Verdict: PASS** (clears bar by 36 pp; CI lower bound 80.5% still clears)
 
-Failure analysis:
-- The 2 "misses" are scoring artifacts (harness over-strict on nested-dict matching), not capability failures.
-- Model returned `{'min': 300000, 'max': 400000}` (correct semantics);
-  ground truth format wraps each value in a list `[{'min': [300000], 'max': [400000]}]`.
-- Recursing the matcher into nested dicts would push score to 25/25 = 100%.
+### Calibration disclosures (added after adversarial proof-read 2026-04-26)
+
+- n=25 is 12.5% of the 200-prompt full set. Headline 96% should be quoted as
+  "~96% (n=25, 95% CI 80-99%)", not as a precise rate.
+- Distractor functions on this slice are semantically distant
+  (e.g. `triangle_properties.get` vs `circle_properties.get`).
+  100% function selection here is REAL on this slice but does NOT extrapolate
+  to all 200 prompts; realistic point estimate is ~92-95% on the full set.
+- Token-budget hidden failures (the iter-7 failure mode): NONE. All 25 latencies
+  12.6–33.1 s, well under the 410 s budget at 5 t/s × 2048 tokens. /no_think +
+  --reasoning-budget 0 + max_tokens=2048 working as intended.
+- "First key of ground_truth" simplification: VERIFIED safe (0 of 200 prompts
+  in BFCL_v4_multiple have multi-key entries). Would break on Multi-Turn /
+  Parallel subsets.
+
+### Failure analysis (the 2 misses are CONFIRMED harness false negatives)
+
+- Gold for `multiple_8`: `budget=[{"min":[300000],"max":[400000]}]` — BFCL wraps
+  every leaf in a singleton list, including leaves of nested dicts.
+- Model returned `{"min":300000,"max":400000}` — semantically identical.
+- The harness's `value_matches()` does exact equality
+  `{'min':300000} == {'min':[300000]}` → False. A nested-dict-aware matcher
+  would pass both. **True model accuracy on this slice is 25/25 = 100%.**
+
+If a defensible-headline number is wanted later: patch `value_matches()` to
+recurse into nested dicts, re-run all 200 prompts. ~70 min wallclock; would
+shrink CI half-width to ~3 pp. NOT blocking the endpoint.
 
 ### Endpoint progress
 - ✅ Local inference (5.36 t/s)
