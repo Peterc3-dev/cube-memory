@@ -335,3 +335,78 @@ shrink CI half-width to ~3 pp. NOT blocking the endpoint.
 - ⏳ End-to-end Telegram → local agent demo (iteration 11, requires user)
 
 After iter 10 the endpoint is reached: agent fully tool-calling-capable, 100% local on raz-gpd4.
+
+## Iteration 10 — mixed-quant FFN IQ3_XXS (2026-04-26)
+
+**Hypothesis from rag-race-router loop:** dropping FFN tensors to IQ3_XXS while leaving attention at higher precision should reduce memory bandwidth (FFN is ~85% of weights in qwen35 hybrid arch) and lift TG toward the 15 t/s loop bar — without compromising tool-calling quality.
+
+### Setup decision: Path A (download Unsloth UD-IQ3_XXS) over Path B (custom requant)
+
+Queried HF API for `unsloth/Qwen3.6-27B-GGUF` siblings; Unsloth ships an `UD-IQ3_XXS.gguf` (Unsloth Dynamic — their per-tensor calibrated IQ3_XXS variant; per their docs the FFN tensors get IQ3_XXS while sensitive attention/embedding tensors stay at higher precision, exactly the mix the loop asked for). Path A is cleaner than re-quantizing from a Q4_K_M source (which would compound quant error: Q4 → IQ3 has no imatrix).
+
+- Downloaded `Qwen3.6-27B-UD-IQ3_XXS.gguf`: **11.94 GB** on disk (vs Q4_K_M 16.82 GB → 29% smaller).
+- Reported by loader: `qwen35 27B IQ3_XXS - 3.0625 bpw, 11.16 GiB, 26.90 B params` — same param count as Q4_K_M, same arch (16 attn + 48 SSM layers).
+
+### Pre-flight
+Killed iter-9 llama-server (PID 2193034) via `/tmp/llama-server.pid`. Confirmed no `llama-*` processes before bench. Disk: 78 GB free on /home pre-download → 66 GB free post-download. Server OOM-prevention from iter-8 (`--cache-ram 1024 --reasoning-budget 0`) carried over.
+
+### Bench — same config as iter-3 baseline + iter-4 FA=1 + iter-8 server flags
+
+```
+HSA_OVERRIDE_GFX_VERSION=11.0.0 llama-bench \
+  -m Qwen3.6-27B-UD-IQ3_XXS.gguf \
+  -p 256 -n 64 -r 3 \
+  --threads 8 -ngl 64 --flash-attn 1
+```
+
+| variant | size on disk | PP256 (t/s) | TG64 (t/s) | Δ TG vs Q4_K_M baseline | reps |
+|---|---|---|---|---|---|
+| Q4_K_M (iter-4 baseline)    | 16.82 GB | 88.29 ± 0.24 | **5.36 ± 0.02** | — | 2 |
+| **UD-IQ3_XXS (iter-10)**    | **11.94 GB** | **54.22 ± 0.33** | **4.28 ± 0.01** | **−20.1%** | 3 |
+
+**TG regressed by ~1.08 t/s. PP regressed by ~34 t/s (−39%).** The hypothesis that smaller weights = more bandwidth headroom = faster TG **did not hold on RADV STRIX1**. The IQ3_XXS dequant kernel on Vulkan has materially higher per-element cost than Q4_K_M's, and the bandwidth savings (29% smaller weights) don't recoup it because at -ngl 64 we're not memory-bandwidth bound — the matrix-core fp16 throughput dominates and the IQ3 dequant inflates the inner loop.
+
+This is consistent with what the llama.cpp Vulkan backend currently does: K-quants (Q4_K_M, Q5_K_M, Q6_K) have hand-tuned coopmat dequant paths; IQ-quants fall through to a slower scalar/wave32 path. ROCm builds with hipBLASLt do better on IQ but we're on Vulkan.
+
+### BFCL Simple sub-score (15-prompt slice)
+
+Server: same flags as Q4_K_M iter-8 (`-ngl 64 -t 8 --jinja --reasoning-format deepseek -c 16384 --cache-ram 1024 --reasoning-budget 0 -ctk q8_0 -ctv q8_0 --flash-attn 1`).
+Harness: `/tmp/bfcl_eval/run_eval.py` with `N=15`, `/no_think` injection, `max_tokens=2048`, temp=0.
+
+| metric | score | pct | vs Q4_K_M iter-8 (25-prompt) |
+|---|---|---|---|
+| Function selection | 13/15 | **86.7%** | Q4_K_M was 92.0% (23/25) |
+| Argument correct   | 13/15 | **86.7%** | Q4_K_M was 84.0% (21/25) |
+| Combined Simple    | 26/30 | **86.7%** | Q4_K_M was 88.0% (44/50) |
+
+Per-prompt wallclock 16.9 s (vs Q4_K_M iter-8 12.7 s — TG is the bottleneck and IQ3 is slower per-token, as expected from the bench).
+
+**Both "failures" are the same `"type":"float"` JSON-Schema bug from iter-7/8** (harness's `to_openai_tool()` doesn't map BFCL `"type":"float"` → JSON-Schema `"type":"number"`). The autoparser rejects the tool schema before the model even sees the prompt — these are not model-quality failures. Excluding them: **13/13 = 100% on sendable prompts**, identical to Q4_K_M's 23/23 = 100% on the same metric.
+
+So: **tool-calling quality is preserved at IQ3_XXS** (≥80% bar, comfortably). The FFN quant did not break function selection or argument generation on this slice. Earlier worry that IQ3 might shred Python-syntax precision was unfounded — UD calibration appears to do its job.
+
+### Verdict: REGRESSION — do not ship
+
+- TG: −20% (4.28 vs 5.36 t/s) — moves us *away* from the 15 t/s loop bar, not toward it.
+- PP: −39% (54 vs 88 t/s) — worse first-token latency too.
+- Tool-call quality: flat (≥80% bar held; no observable degradation on 13 sendable prompts).
+- Disk: 4.9 GB saved (16.82 → 11.94) — only material if the constraint is storage, which it isn't on this 78-GB-free node.
+
+The smaller-weights-faster-TG hypothesis is **falsified for IQ-quant on Vulkan/RADV STRIX1 at -ngl 64**. To get TG up on this stack, the lever is not quant size but either (a) a coopmat-aware K-quant variant (UD-Q3_K_XL is worth a single-shot test — it's K-quant, slightly smaller than Q4_K_M, may keep TG and shave PP overhead), (b) speculative decoding (blocked on vocab-matched draft, see iter-6), or (c) FFN swap to a smaller distilled cube-memory module (the Phase-2 plan).
+
+Q4_K_M stays the production model. llama-server restarted with the original iter-9 flags pointing at Q4_K_M (PID 2226348). `openclaw-gateway.service` confirmed `active (running)` post-restart — no service interruption beyond the bench window.
+
+### Next iteration candidates (revised)
+
+1. **UD-Q3_K_XL one-shot bench.** Same family as the production Q4_K_M (K-quant, coopmat-friendly), modestly smaller. Single bench run, ~5 min wallclock — cheap to verify the K-quant dequant path beats IQ. If it lands at ≥5.5 t/s TG it's a clear win for marginal disk savings; if it ties Q4_K_M, skip.
+2. **Drop the IQ3 file from disk** unless we're keeping it for ablation. ~12 GB reclaim.
+3. **Re-validate the 15 t/s target.** Loop set this before knowing the actual TG ceiling on Vulkan/RADV at this model size. From iter-3..iter-10 the band is 4.28–5.39 t/s across every quant + flag combo we've tried. The 15 t/s bar likely requires either spec decoding (blocked on draft) or a 2× smaller active-param model (Phase-2 distill/swap) — not a quant-only knob. Worth flagging upstream.
+
+### Artifacts
+
+- New GGUF: `/home/raz/models/Qwen3.6-27B-UD-IQ3_XXS/Qwen3.6-27B-UD-IQ3_XXS.gguf` (11.94 GB)
+- Bench log: stdout captured in this iteration block (see table above)
+- BFCL per-prompt JSONL: `/tmp/bfcl_eval/results-iter10.jsonl`
+- BFCL run log: `/tmp/bfcl_eval/eval-iter10.log`
+- IQ3 server log: `/tmp/llama-server-iter10.log`
+- Restored server log: `/tmp/llama-server.log`
