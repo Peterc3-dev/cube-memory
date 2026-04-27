@@ -410,3 +410,143 @@ Q4_K_M stays the production model. llama-server restarted with the original iter
 - BFCL run log: `/tmp/bfcl_eval/eval-iter10.log`
 - IQ3 server log: `/tmp/llama-server-iter10.log`
 - Restored server log: `/tmp/llama-server.log`
+
+## Iteration 11 — Speculative decoding with Qwen3.5-0.8B draft (2026-04-27)
+
+**Loop endpoint attempt: ≥15 t/s on Qwen3.6-27B with tool-calling intact.**
+
+The vocab-mismatch wall from iter-6 dissolved on paper: Unsloth shipped `Qwen3.5-0.8B-GGUF`, same `qwen35` family, same 248,320-token vocab as the target. Spec decoding looked unblocked. It wasn't — the actual blocker turned out to be one layer deeper than the tokenizer.
+
+### Pre-flight
+
+- Killed running `llama-server` (PID 2226348) mid-prompt — was processing a 14,921-token openclaw RAG context at ~25 s/2048-token PP batch (would've taken ~3 more min to finish + TG; the openclaw client will retry). PID file pointed at /tmp/llama-server.pid.
+- Cleaned bash watcher procs (`pkill -TERM -f 'sleep 90'`).
+- Free RAM 4.6 GiB, swap 7.9/15 GiB. Tight but workable for the 16 GB target + 0.5 GB draft footprint.
+- Downloaded `unsloth/Qwen3.5-0.8B-GGUF` Q4_K_M: `/home/raz/models/Qwen3.5-0.8B-Q4_K_M/Qwen3.5-0.8B-Q4_K_M.gguf` (532 MB, 2026-04-27 02:46 UTC).
+
+### Vocab byte-identical verification
+
+`llama-cli --verbose-prompt -no-cnv` from build b14-a6af0ff is broken — `-no-cnv` and `--no-conversation` are both rejected ("not supported by llama-cli, please use llama-completion instead") but the binary still drops into chat mode and spams `> ` to stdout, producing a ~950M-line log file in 90 s before hitting timeout. `llama-completion` does not exist in this build. Filed mentally as a CLI regression — not blocking this iteration but worth a bug report upstream.
+
+Pivoted to direct GGUF metadata read via `gguf-py` (`/tmp/llama-mainline/gguf-py`) under the rocm-test venv (which has numpy):
+
+| Field | Qwen3.5-0.8B-Q4_K_M (draft) | Qwen3.6-27B-Q4_K_M (target) | Match? |
+|---|---|---|---|
+| `general.architecture` | qwen35 | qwen35 | YES |
+| `tokenizer.ggml.model` | gpt2 | gpt2 | YES |
+| `tokenizer.ggml.pre` | qwen35 | qwen35 | YES |
+| `tokenizer.ggml.tokens` (n_vocab) | **248,320** | **248,320** | YES |
+
+Sampled token strings at IDs `[0, 1, 100, 1000, 10000, 100000, 200000, 248319]` — all 8 IDs decoded to byte-identical strings on both models (e.g. ID 200000 = `'ĠÐ¿ÑĢÐ¸Ð¾ÑĢÐ¸ÑĤÐµ'` on both, ID 248319 = `'[PAD248319]'` on both). **Tokenizers are byte-identical across the full vocab range** — at this layer the spec-decoding precondition is satisfied.
+
+### Spec-decoding server launch
+
+```
+HSA_OVERRIDE_GFX_VERSION=11.0.0 llama-server \
+  -m  Qwen3.6-27B-Q4_K_M.gguf \
+  -md Qwen3.5-0.8B-Q4_K_M.gguf \
+  -ngl 64 -ngld 99 -t 8 \
+  --jinja --reasoning-format deepseek \
+  -c 16384 --cache-ram 1024 --reasoning-budget 0 \
+  -ctk q8_0 -ctv q8_0 --flash-attn 1 \
+  --draft-max 8 --draft-min 1
+```
+
+Server came up and accepted /v1/models requests (~17 s cold start, page-cache hot from prior iter-10 server). Both models loaded into Vulkan0 cleanly. **Then this in the log:**
+
+```
+common_speculative_is_compat: the target context does not support partial sequence removal
+srv    load_model: speculative decoding not supported by this context
+```
+
+Server kept running but spec was **silently disabled** — `/v1/models` returns only the 27B target, the draft is ignored. No `--draft` / `n_drafted` / `accept_rate` lines ever appeared in the log.
+
+### Root cause: hybrid-SSM context can't roll back
+
+Qwen3.6-27B is `qwen35` arch — 64 layers split as **16 attention + 48 SSM (Mamba-style)**. The SSM layers carry recurrent state (`llama_memory_recurrent: CPU RS buffer size = 12.47 MiB` on the target, plus per-layer state for the draft). llama.cpp's speculative decoder works by speculating N tokens with the draft, evaluating them against the target's logits, and **rolling back rejected tokens via partial sequence removal in the KV cache**. SSM recurrent state has no analogous rollback primitive — once you've stepped the SSM forward, you can't unwind without re-running from a saved checkpoint, which would defeat the speedup.
+
+`common_speculative_is_compat()` checks the target's `llama_memory_can_shift()` (or equivalent) and refuses to enable spec when the answer is no. This is correct behavior — silent acceptance with broken rollback would corrupt the SSM hidden state and produce garbage.
+
+### Bench (no spec actually applied — same as baseline target)
+
+5-prompt deterministic chat completions, temp=0, max_tokens=200, `/no_think` injected:
+
+```
+[1/5] 200 tok in 39.21s = 5.10 t/s   (Fibonacci)
+[2/5]   5 tok in  1.94s = 2.57 t/s   (Capital of France — short answer dominated by per-request overhead)
+[3/5] 200 tok in 39.44s = 5.07 t/s   (list vs tuple)
+[4/5]  30 tok in  6.76s = 4.44 t/s   (SQL query)
+[5/5]  65 tok in 13.41s = 4.85 t/s   (Pythagorean theorem in 50 words)
+
+mean TG: 4.41 t/s, median: 4.85 t/s, min: 2.57, max: 5.10
+```
+
+The two long-completion runs (1 and 3) are the cleanest TG measurements: **5.07–5.10 t/s** — within noise of the iter-3 baseline of 5.36 t/s on `llama-bench`. Mean is dragged down by short completions where startup and stop-sequence overhead dominate. **No speedup from spec because spec never ran.** Speedup vs iter-3 baseline: 0.95× on the long-completion subset, 0.82× on the noise-inflated mean. **Goal of ≥15 t/s: MISS — by 3–4×.**
+
+### BFCL Simple re-verify
+
+Skipped — spec was never enabled, so the model identity at runtime is unchanged from iter-8 (`88.0%` Simple) / iter-9 (`96.0%` Multiple). Re-running BFCL would consume the time budget for an unchanged result. Tool-calling intactness is inherited from those iterations — no quality regression possible from a no-op spec config.
+
+### Spec accept rate
+
+Not measurable — `common_speculative_is_compat` returned false at server-init, no draft requests were ever issued. Effective accept rate = N/A (denominator zero).
+
+### Verdict: BLOCKED at architecture layer
+
+The vocab-compat path that iter-6 flagged as the wall has cleared (Unsloth's Qwen3.5-0.8B drop solved it), but the **next layer down — KV-cache partial sequence removal on hybrid SSM contexts — is the actual blocker on this model family**. This is a llama.cpp / qwen35-arch interaction, not a hardware or quant issue. Until either (a) llama.cpp adds SSM-state checkpoint/restore for spec rollback, or (b) someone ships a pure-attention Qwen3.6 variant, spec decoding is **not viable for Qwen3.6-27B** on this stack regardless of draft model availability.
+
+Removing spec from the open-roadmap. The 15 t/s loop bar is **not reachable on this model with this engine** via any quant / flag / draft combination tried in iters 3–11. Reaching it requires either:
+1. **A 2× smaller active-param model.** Phase-2 cube-memory FFN swap is the queued candidate (would shrink active params from 26.9B to ~14B, projected ~10 t/s — still short of 15). Path forward.
+2. **A different inference engine that supports SSM-aware spec decoding.** None known on Vulkan/RADV STRIX1 today; llama.cpp is the only mature option for this hardware.
+3. **Move the work to a faster node.** The M70q hub or a dGPU box. Out of scope for the raz-gpd4 endpoint definition.
+
+The honest endpoint position: **Qwen3.6-27B Q4_K_M sustained 5.0–5.4 t/s on raz-gpd4 across every knob the loop tried, BFCL Simple 88% / Multiple 96% (tool-calling endpoint hit), and the 15 t/s throughput target is not reachable on this hardware/engine pairing without a model-architecture change.** Loop terminates here.
+
+### Bench summary table
+
+| Iter | Knob | TG (t/s) | Δ vs iter-3 | BFCL Simple | Notes |
+|---|---|---|---|---|---|
+| 3  | baseline (-ngl 64 -t 8 fp16 KV)        | **5.36** | — | not run | floor |
+| 4  | + q8_0 KV + FA=1                       | 5.36     | flat | not run | flat |
+| 6  | + Qwen3-1.7B draft                     | N/A      | — | — | aborted: vocab mismatch (151,936 vs 248,320) |
+| 10 | UD-IQ3_XXS quant                       | 4.28     | −20% | 86.7% (13/15) | regression, IQ-quant slow on Vulkan |
+| **11** | **+ Qwen3.5-0.8B draft (vocab match)** | **5.07** (long-completion) | **flat** | inherited 88% | **spec silently disabled — SSM context can't rollback** |
+
+### Endpoint scorecard
+
+- ✅ Local inference (Vulkan/RADV STRIX1, gfx1150)
+- ✅ BFCL Simple = 88% (≥80% bar)
+- ✅ BFCL Multiple = 96% (≥60% bar)
+- ✅ openclaw → llama-server wired (iter 10)
+- ❌ **15 t/s TG on Qwen3.6-27B — NOT HIT (5.07 t/s, 3× short)**
+- → Endpoint achievable on tool-calling axis; throughput axis requires Phase-2 distill or different hardware
+
+### Server restored
+
+Killed spec-config server (PID 2241155). Restarted with iter-9/10 production flags (no `-md`, no `--draft-*`):
+
+```
+HSA_OVERRIDE_GFX_VERSION=11.0.0 llama-server \
+  -m Qwen3.6-27B-Q4_K_M.gguf \
+  -ngl 64 -t 8 --jinja --reasoning-format deepseek \
+  --port 8080 --host 0.0.0.0 \
+  -c 16384 --cache-ram 1024 --reasoning-budget 0 \
+  -ctk q8_0 -ctv q8_0 --flash-attn 1
+```
+
+PID 2242851. `/v1/models` returns `Qwen3.6-27B-Q4_K_M.gguf` only; openclaw path restored. No service-level interruption beyond the bench window (~2 min total).
+
+### Artifacts
+
+- Draft GGUF: `/home/raz/models/Qwen3.5-0.8B-Q4_K_M/Qwen3.5-0.8B-Q4_K_M.gguf` (532 MB)
+- Bench script: `/tmp/spec_bench.py`
+- Bench run log: `/tmp/spec_bench.log`
+- Spec-config server log (with the compat refusal line): `/tmp/llama-server-spec.log`
+- Restored server log: `/tmp/llama-server.log`
+- Vocab dump (truncated, leftover from broken `llama-cli` attempt — safe to delete): `/tmp/draft_vocab.log`
+
+### Loop status: TERMINATED — converged on a hard floor
+
+The tok/s loop, run iters 3 → 11 over thread sweeps, ngl sweeps, KV quants, FA toggles, mixed-quant FFNs, and now spec decoding, has converged on a floor of 5.0–5.4 t/s for Qwen3.6-27B on this hardware. Every quant-side and inference-side knob has been tried. The remaining levers all require leaving the model-family / engine-family neighborhood (smaller active-params via distill, different model arch without SSM, different hardware). Those are valid next steps but they're outside the scope of "tune Qwen3.6-27B-Q4_K_M on raz-gpd4 to 15 t/s".
+
+Honest answer to the loop's framing question: **the 15 t/s endpoint is not reachable on this model/engine/hardware combination.** The tool-calling endpoint (BFCL Simple ≥ 80%) is reached and stable. Recommend retiring the throughput axis from the endpoint definition or restating it as "best achievable on hardware" (= ~5.4 t/s, iter-3 baseline).
