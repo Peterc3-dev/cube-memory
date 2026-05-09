@@ -1,0 +1,108 @@
+{
+  "experiment": "B_mlp_only_control",
+  "purpose": "Control for exp1b \u2014 tests if overfitting was VSA's fault or MLP's",
+  "architecture": "one_hot(64) \u2192 Linear(64,512) \u2192 GELU \u2192 Linear(512,512) \u2192 GELU \u2192 Linear(512,8192)",
+  "n_params": 4498432,
+  "n_train": 5100,
+  "n_val": 900,
+  "steps": 2000,
+  "batch_size": 16,
+  "lr": 0.001,
+  "elapsed_s": 320.1,
+  "final_val_acc": 0.0097,
+  "final_val_top5": 0.0156,
+  "final_exact_match": 0.0,
+  "final_val_loss": 9.2369,
+  "marginal_mode_baseline_acc": 0.0098,
+  "history": [
+    {
+      "step": 0,
+      "train_loss": 9.0114,
+      "val_loss": 9.0107,
+      "val_acc": 0.0002,
+      "val_top5": 0.0009,
+      "exact_match": 0.0
+    },
+    {
+      "step": 200,
+      "train_loss": 8.8223,
+      "val_loss": 8.8892,
+      "val_acc": 0.0088,
+      "val_top5": 0.0159,
+      "exact_match": 0.0
+    },
+    {
+      "step": 400,
+      "train_loss": 8.8025,
+      "val_loss": 8.8946,
+      "val_acc": 0.0091,
+      "val_top5": 0.0163,
+      "exact_match": 0.0
+    },
+    {
+      "step": 600,
+      "train_loss": 8.7137,
+      "val_loss": 9.0058,
+      "val_acc": 0.0092,
+      "val_top5": 0.0155,
+      "exact_match": 0.0
+    },
+    {
+      "step": 800,
+      "train_loss": 8.4918,
+      "val_loss": 9.0858,
+      "val_acc": 0.0093,
+      "val_top5": 0.0155,
+      "exact_match": 0.0
+    },
+    {
+      "step": 1000,
+      "train_loss": 8.5119,
+      "val_loss": 9.1247,
+      "val_acc": 0.0095,
+      "val_top5": 0.0153,
+      "exact_match": 0.0
+    },
+    {
+      "step": 1200,
+      "train_loss": 8.3269,
+      "val_loss": 9.1784,
+      "val_acc": 0.0092,
+      "val_top5": 0.0152,
+      "exact_match": 0.0
+    },
+    {
+      "step": 1400,
+      "train_loss": 8.4556,
+      "val_loss": 9.2179,
+      "val_acc": 0.0094,
+      "val_top5": 0.0156,
+      "exact_match": 0.0
+    },
+    {
+      "step": 1600,
+      "train_loss": 8.4035,
+      "val_loss": 9.2283,
+      "val_acc": 0.0097,
+      "val_top5": 0.0156,
+      "exact_match": 0.0
+    },
+    {
+      "step": 1800,
+      "train_loss": 8.4317,
+      "val_loss": 9.2373,
+      "val_acc": 0.0097,
+      "val_top5": 0.0156,
+      "exact_match": 0.0
+    },
+    {
+      "step": 1999,
+      "train_loss": 8.323,
+      "val_loss": 9.2369,
+      "val_acc": 0.0097,
+      "val_top5": 0.0156,
+      "exact_match": 0.0
+    }
+  ],
+  "interpretation": "MLP-only receives NO image-specific input (only position index). It can only memorize the marginal token distribution per position. Any accuracy above marginal-mode indicates the MLP is learning position-specific priors. Compare with exp1b VSA+MLP: if VSA+MLP matches this, VSA contributed nothing; if it exceeds, VSA provides signal."
+}

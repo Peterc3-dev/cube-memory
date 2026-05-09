@@ -1,0 +1,217 @@
+{
+  "D=256": {
+    "d": 256,
+    "bits_per_pos": 2.0,
+    "elapsed_s": 4.0,
+    "by_swaps": {
+      "1": {
+        "pos_acc": 0.559,
+        "exact_match": 0.0,
+        "swap_acc": 0.9765,
+        "n_swapped_avg": 2.0
+      },
+      "2": {
+        "pos_acc": 0.5628,
+        "exact_match": 0.0,
+        "swap_acc": 0.9801,
+        "n_swapped_avg": 4.0
+      },
+      "4": {
+        "pos_acc": 0.572,
+        "exact_match": 0.0,
+        "swap_acc": 0.9791,
+        "n_swapped_avg": 8.0
+      },
+      "8": {
+        "pos_acc": 0.597,
+        "exact_match": 0.0,
+        "swap_acc": 0.9723,
+        "n_swapped_avg": 16.0
+      },
+      "16": {
+        "pos_acc": 0.6724,
+        "exact_match": 0.0,
+        "swap_acc": 0.9472,
+        "n_swapped_avg": 32.0
+      },
+      "32": {
+        "pos_acc": 0.8682,
+        "exact_match": 0.003,
+        "swap_acc": 0.8682,
+        "n_swapped_avg": 64.0
+      }
+    }
+  },
+  "D=512": {
+    "d": 512,
+    "bits_per_pos": 3.0,
+    "elapsed_s": 5.7,
+    "by_swaps": {
+      "1": {
+        "pos_acc": 0.8294,
+        "exact_match": 0.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 2.0
+      },
+      "2": {
+        "pos_acc": 0.828,
+        "exact_match": 0.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 4.0
+      },
+      "4": {
+        "pos_acc": 0.8224,
+        "exact_match": 0.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 8.0
+      },
+      "8": {
+        "pos_acc": 0.8215,
+        "exact_match": 0.0,
+        "swap_acc": 0.9999,
+        "n_swapped_avg": 16.0
+      },
+      "16": {
+        "pos_acc": 0.8439,
+        "exact_match": 0.0,
+        "swap_acc": 0.999,
+        "n_swapped_avg": 32.0
+      },
+      "32": {
+        "pos_acc": 0.9925,
+        "exact_match": 0.6715,
+        "swap_acc": 0.9925,
+        "n_swapped_avg": 64.0
+      }
+    }
+  },
+  "D=1024": {
+    "d": 1024,
+    "bits_per_pos": 4.0,
+    "elapsed_s": 9.6,
+    "by_swaps": {
+      "1": {
+        "pos_acc": 0.9982,
+        "exact_match": 0.8925,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 2.0
+      },
+      "2": {
+        "pos_acc": 0.9958,
+        "exact_match": 0.7595,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 4.0
+      },
+      "4": {
+        "pos_acc": 0.9907,
+        "exact_match": 0.5455,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 8.0
+      },
+      "8": {
+        "pos_acc": 0.9822,
+        "exact_match": 0.3025,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 16.0
+      },
+      "16": {
+        "pos_acc": 0.9718,
+        "exact_match": 0.153,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 32.0
+      },
+      "32": {
+        "pos_acc": 1.0,
+        "exact_match": 0.9995,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 64.0
+      }
+    }
+  },
+  "D=2048": {
+    "d": 2048,
+    "bits_per_pos": 5.0,
+    "elapsed_s": 19.6,
+    "by_swaps": {
+      "1": {
+        "pos_acc": 1.0,
+        "exact_match": 0.9975,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 2.0
+      },
+      "2": {
+        "pos_acc": 1.0,
+        "exact_match": 0.9975,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 4.0
+      },
+      "4": {
+        "pos_acc": 1.0,
+        "exact_match": 0.9985,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 8.0
+      },
+      "8": {
+        "pos_acc": 0.9999,
+        "exact_match": 0.9945,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 16.0
+      },
+      "16": {
+        "pos_acc": 0.9994,
+        "exact_match": 0.9645,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 32.0
+      },
+      "32": {
+        "pos_acc": 1.0,
+        "exact_match": 1.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 64.0
+      }
+    }
+  },
+  "D=4096": {
+    "d": 4096,
+    "bits_per_pos": 6.0,
+    "elapsed_s": 55.6,
+    "by_swaps": {
+      "1": {
+        "pos_acc": 1.0,
+        "exact_match": 1.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 2.0
+      },
+      "2": {
+        "pos_acc": 1.0,
+        "exact_match": 1.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 4.0
+      },
+      "4": {
+        "pos_acc": 1.0,
+        "exact_match": 1.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 8.0
+      },
+      "8": {
+        "pos_acc": 1.0,
+        "exact_match": 1.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 16.0
+      },
+      "16": {
+        "pos_acc": 1.0,
+        "exact_match": 1.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 32.0
+      },
+      "32": {
+        "pos_acc": 1.0,
+        "exact_match": 1.0,
+        "swap_acc": 1.0,
+        "n_swapped_avg": 64.0
+      }
+    }
+  }
+}
