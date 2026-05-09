@@ -260,9 +260,9 @@ structural (cross-talk from superposition), not capacity.
 
 **Experiment 2: Real TiTok tokens.** Test on Imagenette (6000 images
 encoded by frozen TiTok). Token distribution: 12.85/13.00 bits entropy,
-all 8192 codes used. Result at D=4096: 0.51% accuracy (same as D=512).
-Near-uniform codebook usage means real tokens are as hard as random —
-no concentration to exploit.
+all 8192 codes used. Result at D=4096: 0.61% accuracy after 1500 steps
+(same plateau as D=512). Near-uniform codebook usage means real tokens
+are as hard as random — no concentration to exploit.
 
 **MLP-only control:** Position one-hot (64) → MLP(64→512→512→8192)
 without any VSA binding achieves 0.93% accuracy, confirming the task

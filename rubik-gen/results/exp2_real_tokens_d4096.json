@@ -1,0 +1,123 @@
+{
+  "experiment": "C_exp2_real_tokens_d4096",
+  "description": "VSA real-arithmetic token binding on real TiTok tokens, D=4096",
+  "d_vsa": 4096,
+  "n_positions": 64,
+  "n_codebook": 8192,
+  "n_params": 33554432,
+  "n_train": 5100,
+  "n_val": 900,
+  "steps": 1500,
+  "batch_size": 16,
+  "lr": 0.001,
+  "elapsed_s": 2031.5,
+  "final_val_acc": 0.0061,
+  "final_val_top5": 0.0103,
+  "final_exact_match": 0.0,
+  "final_val_loss": 9.0088,
+  "random_baseline_acc": 0.000122,
+  "theoretical_capacity_bits": 6,
+  "required_bits": 13,
+  "history": [
+    {
+      "step": 0,
+      "train_loss": 9.0109,
+      "val_loss": 9.0109,
+      "val_acc": 0.0003,
+      "val_top5": 0.0013,
+      "exact_match": 0.0,
+      "wall_s": 6.1
+    },
+    {
+      "step": 150,
+      "train_loss": 9.0102,
+      "val_loss": 9.0105,
+      "val_acc": 0.0039,
+      "val_top5": 0.0066,
+      "exact_match": 0.0,
+      "wall_s": 208.6
+    },
+    {
+      "step": 300,
+      "train_loss": 9.0092,
+      "val_loss": 9.0101,
+      "val_acc": 0.0042,
+      "val_top5": 0.0077,
+      "exact_match": 0.0,
+      "wall_s": 409.6
+    },
+    {
+      "step": 450,
+      "train_loss": 9.0069,
+      "val_loss": 9.0098,
+      "val_acc": 0.0047,
+      "val_top5": 0.0086,
+      "exact_match": 0.0,
+      "wall_s": 611.0
+    },
+    {
+      "step": 600,
+      "train_loss": 9.0072,
+      "val_loss": 9.0095,
+      "val_acc": 0.0048,
+      "val_top5": 0.0093,
+      "exact_match": 0.0,
+      "wall_s": 813.3
+    },
+    {
+      "step": 750,
+      "train_loss": 9.0068,
+      "val_loss": 9.0092,
+      "val_acc": 0.0049,
+      "val_top5": 0.0094,
+      "exact_match": 0.0,
+      "wall_s": 1016.5
+    },
+    {
+      "step": 900,
+      "train_loss": 9.0052,
+      "val_loss": 9.0091,
+      "val_acc": 0.0052,
+      "val_top5": 0.0096,
+      "exact_match": 0.0,
+      "wall_s": 1219.9
+    },
+    {
+      "step": 1050,
+      "train_loss": 9.0054,
+      "val_loss": 9.0089,
+      "val_acc": 0.0055,
+      "val_top5": 0.0098,
+      "exact_match": 0.0,
+      "wall_s": 1423.0
+    },
+    {
+      "step": 1200,
+      "train_loss": 9.0045,
+      "val_loss": 9.0089,
+      "val_acc": 0.0057,
+      "val_top5": 0.0098,
+      "exact_match": 0.0,
+      "wall_s": 1626.3
+    },
+    {
+      "step": 1350,
+      "train_loss": 9.0056,
+      "val_loss": 9.0088,
+      "val_acc": 0.0058,
+      "val_top5": 0.0098,
+      "exact_match": 0.0,
+      "wall_s": 1829.3
+    },
+    {
+      "step": 1499,
+      "train_loss": 9.0048,
+      "val_loss": 9.0088,
+      "val_acc": 0.0058,
+      "val_top5": 0.0098,
+      "exact_match": 0.0,
+      "wall_s": 2031.5
+    }
+  ],
+  "notes": "Real-arithmetic VSA (cos/sin stored separately, no complex tensors). Position phasors frozen (seed 42). Code embeddings learned. Encode: phasor multiply + superpose + unitize. Retrieve: conjugate unbind + cosine similarity / d. Result confirms capacity bottleneck: D=4096 with 64 positions gives ~6 bits per slot, insufficient for 8192-entry codebook (13 bits needed)."
+}
