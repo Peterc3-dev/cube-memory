@@ -120,9 +120,12 @@ def train(
     log_every: int,
     val_every: int,
     device: str,
+    version: int = 1,
+    n_heads: int = 4,
+    tau_init: float = 1.0,
+    tau_final: float = 0.1,
 ) -> dict:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from cube_memory_layer import CubeMemoryLayer  # local import after path fix
     from safetensors.torch import save_file
 
     torch.manual_seed(seed)
@@ -136,10 +139,19 @@ def train(
     logger.info("split: %d train / %d val (val_frac=%.3f)",
                 train_idx.numel(), val_idx.numel(), val_split)
 
-    model = CubeMemoryLayer(
-        d_in=d_in, d_codebook=d_codebook, d_value=d_value,
-        m=m, p=p, n_slots=n_slots, top_k=top_k, seed=seed,
-    ).to(device)
+    if version == 2:
+        from cube_memory_layer_v2 import CubeMemoryLayerV2
+        model = CubeMemoryLayerV2(
+            d_in=d_in, d_codebook=d_codebook, d_value=d_value,
+            m=m, p=p, n_slots=n_slots, top_k=top_k, seed=seed,
+            n_heads=n_heads, tau_init=tau_init,
+        ).to(device)
+    else:
+        from cube_memory_layer import CubeMemoryLayer
+        model = CubeMemoryLayer(
+            d_in=d_in, d_codebook=d_codebook, d_value=d_value,
+            m=m, p=p, n_slots=n_slots, top_k=top_k, seed=seed,
+        ).to(device)
 
     optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
@@ -151,6 +163,16 @@ def train(
     x_out = x_out.cpu().pin_memory() if device != "cpu" else x_out
 
     rng = torch.Generator(device="cpu").manual_seed(seed + 1)
+
+    # Pre-allocated pinned scratch buffers. x_in[idx] is advanced-indexing
+    # into a pinned tensor, which produces an UNPINNED copy — so the
+    # subsequent .to(device, non_blocking=True) silently blocks. Copying
+    # into a pre-pinned scratch first restores async H2D.
+    if device != "cpu":
+        scratch_in = torch.empty(batch_size, x_in.shape[-1], dtype=x_in.dtype, pin_memory=True)
+        scratch_out = torch.empty(batch_size, x_out.shape[-1], dtype=x_out.dtype, pin_memory=True)
+    else:
+        scratch_in = scratch_out = None
 
     train_loss_history: List[float] = []
     val_loss_history: List[Tuple[int, float]] = []
@@ -165,8 +187,14 @@ def train(
                 0, train_idx.numel(), (batch_size,), generator=rng
             )
         ]
-        batch_in = x_in[idx].unsqueeze(0).to(device, non_blocking=True)
-        batch_out = x_out[idx].unsqueeze(0).to(device, non_blocking=True)
+        if scratch_in is not None:
+            torch.index_select(x_in, 0, idx, out=scratch_in)
+            torch.index_select(x_out, 0, idx, out=scratch_out)
+            batch_in = scratch_in.unsqueeze(0).to(device, non_blocking=True)
+            batch_out = scratch_out.unsqueeze(0).to(device, non_blocking=True)
+        else:
+            batch_in = x_in[idx].unsqueeze(0)
+            batch_out = x_out[idx].unsqueeze(0)
 
         optim.zero_grad()
         pred = model(batch_in)
@@ -174,12 +202,21 @@ def train(
         loss.backward()
         optim.step()
 
+        # Tau annealing for V2 Gumbel-softmax cleanup.
+        if version == 2:
+            frac = step / max(steps - 1, 1)
+            tau = tau_init + (tau_final - tau_init) * frac
+            model.set_tau(tau)
+
         train_loss_history.append(loss.item())
         if initial_loss is None:
             initial_loss = loss.item()
 
         if step % log_every == 0 or step == steps - 1:
-            logger.info("step %5d  train_mse=%.6f", step, loss.item())
+            if version == 2:
+                logger.info("step %5d  train_mse=%.6f  tau=%.4f", step, loss.item(), tau)
+            else:
+                logger.info("step %5d  train_mse=%.6f", step, loss.item())
 
         if val_every > 0 and (step % val_every == 0 or step == steps - 1):
             model.eval()
@@ -218,6 +255,7 @@ def train(
         else:
             state[k] = v.contiguous()
     metadata = {
+        "version": str(version),
         "layer": str(layer),
         "d_in": str(d_in),
         "d_codebook": str(d_codebook),
@@ -230,6 +268,10 @@ def train(
         "steps": str(steps),
         "final_train_mse": f"{train_loss_history[-1]:.6e}",
     }
+    if version == 2:
+        metadata["n_heads"] = str(n_heads)
+        metadata["tau_init"] = str(tau_init)
+        metadata["tau_final"] = str(tau_final)
     save_file(state, str(output), metadata=metadata)
     logger.info("saved %s", output)
 
@@ -243,19 +285,23 @@ def train(
     }
 
 
-def load_layer(path: Path) -> "CubeMemoryLayer":
-    """Inverse of the save path: reconstruct CubeMemoryLayer from a
-    safetensors checkpoint, recombining `.real`/`.imag` keys back into
-    the complex codebook buffers and reading hyperparams from metadata.
+def load_layer(path: Path) -> "torch.nn.Module":
+    """Inverse of the save path: reconstruct CubeMemoryLayer (V1) or
+    CubeMemoryLayerV2 from a safetensors checkpoint, recombining
+    `.real`/`.imag` keys back into complex codebook tensors and reading
+    hyperparams from metadata.
+
+    The checkpoint version is determined by the ``version`` metadata key
+    (defaults to ``"1"`` for legacy checkpoints).
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from cube_memory_layer import CubeMemoryLayer
     from safetensors.torch import load_file, safe_open
 
     with safe_open(str(path), framework="pt") as f:
         meta = dict(f.metadata() or {})
     raw = load_file(str(path))
 
+    # Recombine .real/.imag pairs into complex tensors.
     merged: Dict[str, torch.Tensor] = {}
     bases = {k[: -len(".real")] for k in raw if k.endswith(".real")}
     for b in bases:
@@ -264,16 +310,35 @@ def load_layer(path: Path) -> "CubeMemoryLayer":
         if not (k.endswith(".real") or k.endswith(".imag")):
             merged[k] = v
 
-    model = CubeMemoryLayer(
-        d_in=int(meta["d_in"]),
-        d_codebook=int(meta["d_codebook"]),
-        d_value=int(meta["d_value"]),
-        m=int(meta["m"]),
-        p=int(meta["p"]),
-        n_slots=int(meta["n_slots"]),
-        top_k=int(meta["top_k"]),
-        seed=int(meta["seed"]),
-    )
+    version = int(meta.get("version", "1"))
+
+    if version == 2:
+        from cube_memory_layer_v2 import CubeMemoryLayerV2
+        model = CubeMemoryLayerV2(
+            d_in=int(meta["d_in"]),
+            d_codebook=int(meta["d_codebook"]),
+            d_value=int(meta["d_value"]),
+            m=int(meta["m"]),
+            p=int(meta["p"]),
+            n_slots=int(meta["n_slots"]),
+            top_k=int(meta["top_k"]),
+            seed=int(meta["seed"]),
+            n_heads=int(meta.get("n_heads", "4")),
+            tau_init=float(meta.get("tau_init", "1.0")),
+        )
+    else:
+        from cube_memory_layer import CubeMemoryLayer
+        model = CubeMemoryLayer(
+            d_in=int(meta["d_in"]),
+            d_codebook=int(meta["d_codebook"]),
+            d_value=int(meta["d_value"]),
+            m=int(meta["m"]),
+            p=int(meta["p"]),
+            n_slots=int(meta["n_slots"]),
+            top_k=int(meta["top_k"]),
+            seed=int(meta["seed"]),
+        )
+
     model.load_state_dict(merged, strict=True)
     return model
 
@@ -297,16 +362,29 @@ def main():
     ap.add_argument("--p", type=int, default=2,
                     help="Number of role axes (bind depth).")
     ap.add_argument("--n-slots", type=int, default=4096)
-    ap.add_argument("--d-value", type=int, default=2048)
+    ap.add_argument("--d-value", type=int, default=None,
+                    help="Slot value dim. Default: 2048 for v1, d_in for v2.")
     ap.add_argument("--top-k", type=int, default=4)
     ap.add_argument("--val-split", type=float, default=0.05)
     ap.add_argument("--log-every", type=int, default=100)
     ap.add_argument("--val-every", type=int, default=1000)
     ap.add_argument("--device", default="cpu",
                     help="cpu or cuda; default cpu (iGPU may be busy).")
+    # V2 support
+    ap.add_argument("--version", type=int, default=2, choices=[1, 2],
+                    help="Layer version: 1=CubeMemoryLayer, 2=CubeMemoryLayerV2 (default).")
+    ap.add_argument("--n-heads", type=int, default=4,
+                    help="Number of retrieval heads (V2 only).")
+    ap.add_argument("--tau-init", type=float, default=1.0,
+                    help="Initial Gumbel-softmax temperature (V2 only).")
+    ap.add_argument("--tau-final", type=float, default=0.1,
+                    help="Final Gumbel-softmax temperature after annealing (V2 only).")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.d_value is None:
+        args.d_value = args.d_in if args.version == 2 else 2048
 
     train(
         activations_dir=args.activations_dir,
@@ -327,6 +405,10 @@ def main():
         log_every=args.log_every,
         val_every=args.val_every,
         device=args.device,
+        version=args.version,
+        n_heads=args.n_heads,
+        tau_init=args.tau_init,
+        tau_final=args.tau_final,
     )
 
 

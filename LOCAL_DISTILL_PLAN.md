@@ -272,3 +272,126 @@ This is the kind of mis-attribution the consortium plan's outer
 loop (chess-strategist) is supposed to catch.
 
 Drafted 2026-04-26.
+
+## Phase B debug (added 2026-04-27)
+
+Phase B trainer ran 8 layers × 5000 steps on real Qwen3.6-27B activations.
+Ran a three-step diagnostic on layer 3 (cheapest) before doing more compute.
+
+### Step 1 — Diagnostic (no training)
+
+Script: `/tmp/phase_b_diag.py`. Loaded layer 3 in/out chunks (50K tokens,
+n_embd=5120, fp32-from-bf16). All-data sanity:
+
+| Tensor | mean | std | min | max | NaN/Inf |
+|---|---|---|---|---|---|
+| x_in  | -2.1e-4 | 1.6e-1  | -4.09 | +5.13 | 0/0 |
+| x_out | +1.2e-4 | 2.79e-2 | -1.52 | +2.92 | 0/0 |
+
+Var(x_in)=2.57e-2; **Var(x_out)=7.77e-4**. Critical observation: x_out has
+~5.7× smaller std than x_in, so the layer 3 FFN delta is small in magnitude.
+
+Loaded `layer_3.safetensors`. All learnable weights are non-zero post-training
+(out_proj abs.mean=8e-3, slot_values abs.mean=1.5e-2, role_proj abs.mean=4.9e-2),
+so the optimizer did move them — no "frozen" failure.
+
+Loss decomposition on a 256-token batch of REAL data:
+
+| | mse_loss | normalized = mse / Var(x_out) |
+|---|---|---|
+| pred(trained model) | 7.05e-4 | **0.908** |
+| zeros (do-nothing baseline) | 7.41e-4 | 0.954 |
+| mean(x_out) | 7.03e-4 | 0.905 |
+
+Full 5% val split (same seed=42 as production):
+- trained model val_mse=**7.67e-4**, normalized **0.953**
+- zero baseline val_mse=8.05e-4, normalized 1.000
+
+**Verdict on the user's confusion**: the "0.674 → 0.673" reading was from
+layer 59 (deepest, residual stream is huge — Var grows ~1000× from layer 3
+to layer 59). Layer 3's actual numbers were **0.000806 → 0.000767** —
+exactly matching my diagnostic. The trainer was working correctly all along
+in absolute terms. **The real problem is the relative number**: the model
+captures only 4.7% of target variance after 5000 steps.
+
+### Step 2 — Hypothesis A: normalized loss + 10× lr (FAILED)
+
+Patched trainer at `/tmp/per_layer_trainer_v2.py`. Multiplied MSE by
+1/Var(x_out) (= 1290 for layer 3), set lr=1e-2.
+
+Result: catastrophic divergence. norm_val went 4.4 → 3.7 → **572** → **171**
+between steps 0/1000/2000/3000. Adam with lr=1e-2 is far too large for this
+loss landscape; constant rescaling of the loss is a near-no-op for Adam
+(per-parameter scale invariance), so the only effective change is the lr
+bump, and it overshoots.
+
+Killed at step 3000 to save the time budget. **Loss-formulation fix does
+not help — the original lr=1e-3 was already in the right ballpark.**
+
+### Step 3 — Hypothesis B: 4× capacity (FAILED)
+
+Re-ran on layer 3 with `n_slots=16384` (was 4096), keeping m=64, p=2,
+d_value=2048, lr=1e-3 unchanged.
+
+| step | v1 (n_slots=4096) val_mse | v3 (n_slots=16384) val_mse |
+|---|---|---|
+| 0    | 0.000806 | 0.000806 |
+| 1000 | 0.000772 | 0.000779 |
+| 2000 | 0.000771 | 0.000768 |
+| 3000 | 0.000768 | 0.000767 |
+| 4000 | 0.000767 | 0.000770 |
+| 4999 | **0.000767** | **0.000766** |
+
+**Bit-identical curves to noise.** 4× more reachable slots changed the final
+val_mse by 0.1% (0.000767 → 0.000766) — within the run-to-run jitter visible
+within either run. Going to p=3 / N=262K (the SPEC.md "realistic" config)
+would give 64× more slots, but the v3 result tells us slot count is not the
+bottleneck. The model converges to the same plateau independent of capacity.
+
+### Verdict — architecture mismatch
+
+Both hypothesis-A (loss formulation) and hypothesis-B (capacity) failed.
+The remaining suspect is the **structural prior** itself:
+
+- The query → role-projection → per-axis cleanup → FHRR bind → slot retrieval
+  pipeline forces the model to address slots through a discrete, low-cardinality
+  algebraic key (m=64 codewords per axis, 2 axes → 4096 distinct addresses, OR
+  16384 with 4× more slots — but cleanup snaps to one of m^p discrete keys
+  regardless of how many slots are physically present).
+- The straight-through estimator on the cleanup step plus unit-modulus
+  re-projection on the bound address discards most of the gradient signal
+  about which slot to address.
+- 4.7% of variance captured ≈ a heavily-bottlenecked linear codebook
+  approximator, not a true FFN replacement.
+
+Stitching these layers into the full model would tank perplexity badly, since
+each layer's output is ~5% of the true delta (and 95% noise/zero).
+
+**Decision: Paper 1 needs reframing. The current cube-memory architecture as
+implemented in `cube_memory_layer.py` cannot fit Qwen3.6-27B FFN behavior at
+this scale.** Options forward:
+
+1. **Reframe Paper 1 as a negative result** — "VSA-keyed memory layers are
+   insufficient for FFN replacement at scale, here's why and here's the
+   capture-rate floor we measured (4.7% of variance, invariant to 4× capacity)."
+2. **Retry with structural changes** — multi-head retrieval, learned (not
+   frozen) codebooks, residual additive output instead of pure projection,
+   gating on the query-to-cleanup nearest-neighbour confidence.
+3. **Pivot to a different drop-in** — small dense FFN (e.g. d_in→d_ff/4→d_in
+   with d_ff=4096) trained with the same MSE harness; uses ~80 MB and would
+   likely capture >50% of variance.
+
+**Do NOT proceed with Phase C stitching on the current 8 layers.** They are
+known broken — they would make the model worse than the do-nothing baseline
+(zero-init residual delta), since pred has 4× too small std AND nonzero
+direction error.
+
+### Files
+
+- Diagnostic: `/tmp/phase_b_diag.py` (log: `/tmp/phase_b_diag.log`)
+- v2 trainer (loss-norm + 10× lr): `/tmp/per_layer_trainer_v2.py` (log: `/tmp/phase_b_v2.log`)
+- v3 run (4× capacity): same trainer, log `/tmp/phase_b_v3.log`,
+  ckpt `/tmp/phase_b_v3/layer_3.safetensors`
+- Original broken ckpts: `/home/raz/cube-memory-cache/trained-layers/layer_*.safetensors`
+- Original run log: `/tmp/phase_b_real.log`
+
