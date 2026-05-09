@@ -98,6 +98,37 @@ for the full FFN). This is an 12.7x compression with 63.5% quality loss
 per layer — potentially viable as a distillation target if the loss is
 tolerable across the full model.
 
+## VSA as MoE routing (tested 2026-05-09)
+
+DeepSeek suggested using VSA as a sparse routing function instead of for
+direct value retrieval. Results on layer 27:
+
+| Config | VSA Routing | Learned Routing | Params |
+|---|---|---|---|
+| 8 experts × rank-256, top-2 | 0.0% | 16.2% | ~22M |
+| 16 experts × rank-128, top-4 | 14.2% | 13.1% | ~22M |
+
+VSA routing with few experts fails entirely (0%). With many experts and
+high top-k, it matches learned routing (~14%). But both MoE approaches
+are far below the rank-2048 linear (36.6%) at similar param count.
+
+The MoE structure is fundamentally limited: top-k × expert_rank = effective
+rank (e.g., 4×128 = 512). A rank-512 linear already reaches ~20% with far
+fewer params and no routing overhead.
+
+## Comprehensive architecture comparison (layer 27)
+
+| Architecture | Best var% | Params | Status |
+|---|---|---|---|
+| Cube Memory V2 (full VSA) | 4.8 | 35M | Dead |
+| VSA-MoE 8×256 top-2 | 0.0 | 24M | Dead |
+| VSA-MoE 16×128 top-4 | 14.2 | 24M | = learned routing |
+| Learned-MoE 8×256 top-2 | 16.2 | 21M | < linear |
+| Rank-1024 linear + SGD | 32.6 | 10.5M | Good, simple |
+| Rank-2048 linear + SGD | 36.6 | 21M | Better, simple |
+| **Rank-2048 + MLP-512** | **38.4** | **26M** | **Best** |
+| Full rank ceiling | 41.1 | 52M | Theoretical max |
+
 ## Best achievable: rank-2048 + MLP-512 (DeepSeek-suggested architecture)
 
 | Architecture | Layer 27 | Layer 43 | Params |
