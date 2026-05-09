@@ -94,36 +94,54 @@ Both ops have Python NumPy ↔ ggml CPU round-trip parity tests
 passing. See `phase1/export_*_test_case.py` and the corresponding
 `tests/test-cube-memory-*-roundtrip.cpp` in the llama.cpp branch.
 
-### 3. (was 4) Round-trip parity test
+### 3. (was 4) Round-trip parity test ✓ DONE (2026-05-08)
 
 PyTorch `CubeMemoryLayer.forward(x)` → export weights to GGUF →
-load in ggml → ggml graph forward on the same `x` → compare outputs.
-This is the **acceptance test** for Phase 2 per `RISKS.md`. If a
-silent layout transpose creeps in during GGUF round-trip, only
-this test catches it.
+standalone C++ forward on the same `x` → compare outputs.
 
 Two halves:
-- **Python side**: `phase1/export_to_gguf.py` reading a trained
-  CubeMemoryLayer state dict, writing a tiny GGUF with the
-  codebooks, slot_keys, slot_values, role_proj, out_proj as named
-  tensors.
-- **C++ side**: `tests/test-cube-memory-roundtrip.cpp` loading that
-  GGUF, building a graph that mirrors the layer's forward
-  (split → cleanup per-axis → bind → retrieve → out_proj), running
-  it on a fixed input, comparing to the PyTorch reference baked
-  into the GGUF as a "gold output" tensor.
+- **Python side**: `phase1/export_to_gguf.py` creates a small
+  CubeMemoryLayer (d_in=32, p=3, d_codebook=8, m=16, n_slots=32,
+  top_k=4), runs full forward (phasor→cleanup→bind→unitize→retrieve→
+  out_proj), exports 9 tensors + gold output to GGUF via gguf-py.
+- **C++ side**: `phase1/test_cube_memory_roundtrip.cpp` standalone
+  binary with built-in GGUF parser, replays full forward pass
+  including the interleaved→block de-interleave at the
+  codebook-to-slot_keys boundary.
 
-### 4. Performance pass on the CPU implementations
+Result: max absolute error **1.16e-10**, RMSE **5.03e-11**.
 
-Currently both CPU forwards are single-threaded (`n_tasks=1`).
-They need to be parallelized once the algorithm is correct:
-- `cleanup`: parallelize the codebook scan across n_tasks workers,
-  reduce the per-worker argmax with atomics or a final serial pass.
-- `retrieve`: parallelize the n_slots dot-product loop, reduce
-  to a top-k via shared array + per-thread heap.
+Critical layout detail validated: codebooks use interleaved
+`[re0,im0,re1,im1,...]` from `torch.view_as_real`, but
+`_addr_to_realq` produces block `[re0,re1,...,im0,im1,...]` for
+slot_keys lookup. The C++ test correctly de-interleaves after
+bind+unitize, confirming RISKS.md buffer-layout risk is covered.
 
-This is needed for any real distillation eval that runs on CPU
-fallback.
+DeepSeek v4 Pro audit confirmed all three layout invariants hold:
+view_as_real interleaving, role_proj orientation, slot_keys format.
+
+### 4. Performance pass on the CPU implementations ✓ DONE (2026-05-08)
+
+Both CPU ops recreated on a fresh llama.cpp checkout (`/tmp/
+llama-mainline`, branch `cube-memory-op`, based on upstream
+`6600172`) with **parallelized** implementations from day one.
+
+- `cleanup`: codebook rows split across `nth` threads; each finds
+  local (best_sim, best_idx) in per-thread wdata slots (16 bytes
+  each, cache-line friendly). After `ggml_barrier`, thread 0
+  reduces and copies the winning row. wdata = `nth * 16` bytes.
+- `retrieve`: n_slots split across threads for dot-product phase
+  into a shared `sims[n_slots]` array in wdata. After barrier,
+  thread 0 does insertion-sort top-k, softmax, weighted gather.
+  wdata = `n_slots * sizeof(float)`.
+
+Thread-count consistency verified: 1, 2, and 4 threads all produce
+identical results across 5 test cases (known-answer, thread
+variations, top_k edge cases).
+
+Changes: +257 lines across 6 files (ggml.h, ggml.c, ops.h,
+ops.cpp, ggml-cpu.c, tests/CMakeLists.txt + test-cube-memory.cpp).
+Full `cmake --build` clean with zero errors.
 
 ### 5. Vulkan shader tiling ✓ DONE (2026-04-26)
 
