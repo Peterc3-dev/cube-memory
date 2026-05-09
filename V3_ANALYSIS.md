@@ -98,10 +98,38 @@ for the full FFN). This is an 12.7x compression with 63.5% quality loss
 per layer — potentially viable as a distillation target if the loss is
 tolerable across the full model.
 
+## Best achievable: rank-2048 + MLP-512 (DeepSeek-suggested architecture)
+
+| Architecture | Layer 27 | Layer 43 | Params |
+|---|---|---|---|
+| Rank-2048 SVD init | 36.5% | 34.1% | 21M |
+| + MLP-512 on residual | **38.4%** | **36.3%** | 26M |
+| + Joint fine-tune | 37.6% | 35.7% | 26M |
+| Full rank ceiling | 41.1% | 39.2% | 52M |
+
+The MLP adds +1.9% on layer 27, +2.2% on layer 43 — small but consistently more than
+cube memory's +0.4%. At 38.4%, we're at 93% of the theoretical linear+nonlinear ceiling.
+
+Joint fine-tune slightly regresses (LR too high for the already-optimal SVD weights).
+The MLP-only stage (frozen linear) gives the best result.
+
+## Signal decomposition (layer 27, 26M param budget)
+
+| Component | Var% | % of best |
+|---|---|---|
+| Linear (rank-2048) | 36.5 | 95.1% |
+| MLP nonlinear | +1.9 | 4.9% |
+| Cube memory VSA | +0.4 | 1.0% |
+| **Best (linear+MLP)** | **38.4** | **100%** |
+| Unreachable ceiling | 41.1 | — |
+
+95% of the learnable FFN structure is linear. The nonlinear component is small (~5%)
+and better captured by a simple GELU MLP than by VSA.
+
 ## DeepSeek v4 Pro Review
 
-Confirmed independently:
+Confirmed independently across two rounds:
 - "VSA adds high distortion with no benefit for continuous approximation"
 - "SVD-initialized linear handles 28% variance; fine-tuning adds 4%. VSA cube memory adds marginal 0.4%"
 - "Rank-2048 linear at ~20M params already hits 36.5% — beating the hybrid with a simpler architecture"
-- Recommended: if pursuing this further, try MLP (rank-256→512 via GELU) on top of linear for ~38-40% at same param count
+- Suggested rank-2048 + MLP-512 → predicted 38-40% → actual: 38.4% (confirmed)
