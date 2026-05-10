@@ -1,0 +1,63 @@
+{
+  "architectures": [
+    {
+      "name": "Full FFN (Qwen3.6-27B)",
+      "flops": 424673280,
+      "params": 212336640,
+      "var_pct": "100 (reference)"
+    },
+    {
+      "name": "Rank-16 linear",
+      "flops": 327680,
+      "params": 163840,
+      "var_pct": 5.9
+    },
+    {
+      "name": "Rank-256 linear",
+      "flops": 5242880,
+      "params": 2621440,
+      "var_pct": 14.2
+    },
+    {
+      "name": "Rank-1024 linear",
+      "flops": 20971520,
+      "params": 10485760,
+      "var_pct": 28.1
+    },
+    {
+      "name": "Rank-2048 linear",
+      "flops": 41943040,
+      "params": 20971520,
+      "var_pct": 36.6
+    },
+    {
+      "name": "Rank-2048 + MLP-512",
+      "flops": 52428800,
+      "params": 26214400,
+      "var_pct": 38.4
+    },
+    {
+      "name": "Cube Memory V2 (VSA)",
+      "flops": 61994496,
+      "params": 51904512,
+      "var_pct": 4.8
+    },
+    {
+      "name": "VSA-MoE 16x128 top-4",
+      "flops": 15976096,
+      "params": 23674880,
+      "var_pct": 14.2
+    },
+    {
+      "name": "Learned-MoE 8x256 top-2",
+      "flops": 10567680,
+      "params": 21012480,
+      "var_pct": 16.2
+    }
+  ],
+  "wallclock_us": {
+    "Rank-2048 linear": 3535.8222499996828,
+    "Cube Memory V2 (VSA)": 6969.790425000042,
+    "Rank-2048 + MLP-512": 4543.56788000041
+  }
+}

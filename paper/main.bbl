@@ -1,0 +1,116 @@
+\begin{thebibliography}{18}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Esser et~al.(2021)Esser, Rombach, and Ommer]{esser2021taming}
+Patrick Esser, Robin Rombach, and Bjorn Ommer.
+\newblock Taming transformers for high-resolution image synthesis.
+\newblock In \emph{CVPR}, 2021.
+
+\bibitem[Fedus et~al.(2022)Fedus, Zoph, and Shazeer]{fedus2022switch}
+William Fedus, Barret Zoph, and Noam Shazeer.
+\newblock Switch transformers: Scaling to trillion parameter models with simple
+  and efficient sparsity.
+\newblock \emph{JMLR}, 2022.
+
+\bibitem[Frady et~al.(2018)Frady, Kleyko, and Sommer]{frady2018theory}
+E.~Paxon Frady, Denis Kleyko, and Friedrich~T. Sommer.
+\newblock A theory of sequence indexing and working memory in recurrent neural
+  networks.
+\newblock In \emph{Neural Computation}, volume~30, pages 1449--1513, 2018.
+
+\bibitem[Frantar and Alistarh(2023)]{frantar2023sparsegpt}
+Elias Frantar and Dan Alistarh.
+\newblock {SparseGPT}: Massive language models can be accurately pruned in
+  one-shot.
+\newblock In \emph{ICML}, 2023.
+
+\bibitem[Hinton et~al.(2015)Hinton, Vinyals, and Dean]{hinton2015distilling}
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean.
+\newblock Distilling the knowledge in a neural network.
+\newblock \emph{arXiv preprint arXiv:1503.02531}, 2015.
+
+\bibitem[Hsu et~al.(2022)Hsu, Hua, Chang, Lou, Shen, and Jin]{hsu2022language}
+Yen-Chang Hsu, Ting Hua, Sungen Chang, Qian Lou, Yilin Shen, and Hongxia Jin.
+\newblock Language model compression with weighted low-rank factorization.
+\newblock \emph{arXiv preprint arXiv:2207.00112}, 2022.
+
+\bibitem[Jiang et~al.(2024)Jiang, Sablayrolles, Rouzaud,
+  et~al.]{jiang2024mixtral}
+Albert~Q. Jiang, Alexandre Sablayrolles, Antoine Rouzaud, et~al.
+\newblock Mixtral of experts.
+\newblock \emph{arXiv preprint arXiv:2401.04088}, 2024.
+
+\bibitem[Kanerva(2009)]{kanerva2009hyperdimensional}
+Pentti Kanerva.
+\newblock Hyperdimensional computing: An introduction to computing in
+  distributed representation with high-dimensional random vectors.
+\newblock \emph{Cognitive Computation}, 1\penalty0 (2):\penalty0 139--159,
+  2009.
+
+\bibitem[Kuhn(1955)]{kuhn1955hungarian}
+Harold~W. Kuhn.
+\newblock The {Hungarian} method for the assignment problem.
+\newblock \emph{Naval Research Logistics Quarterly}, 2\penalty0 (1-2):\penalty0
+  83--97, 1955.
+
+\bibitem[Lample et~al.(2019)Lample, Sablayrolles, Ranzato, Ott, and
+  Joulin]{lample2019large}
+Guillaume Lample, Alexandre Sablayrolles, Marc'Aurelio Ranzato, Matti Ott, and
+  Armand Joulin.
+\newblock Large memory layers with product keys.
+\newblock In \emph{NeurIPS}, 2019.
+
+\bibitem[Penedo et~al.(2024)Penedo, Kydl{\'\i}\v{c}ek, Lozhkov,
+  et~al.]{penedo2024fineweb}
+Guilherme Penedo, Hynek Kydl{\'\i}\v{c}ek, Anton Lozhkov, et~al.
+\newblock {FineWeb}: decanting the web for the finest text data at scale.
+\newblock \emph{arXiv preprint arXiv:2406.17557}, 2024.
+
+\bibitem[Plate(2003)]{plate2003holographic}
+Tony~A. Plate.
+\newblock Holographic reduced representations.
+\newblock \emph{IEEE Transactions on Neural Networks}, 2003.
+
+\bibitem[{Qwen Team}(2025)]{qwen2025}
+{Qwen Team}.
+\newblock Qwen3 technical report.
+\newblock \emph{arXiv preprint arXiv:2505.09388}, 2025.
+
+\bibitem[Shazeer et~al.(2017)Shazeer, Mirhoseini, Maziarz, Davis, Le, Hinton,
+  and Dean]{shazeer2017outrageously}
+Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le,
+  Geoffrey Hinton, and Jeff Dean.
+\newblock Outrageously large neural networks: The sparsely-gated
+  mixture-of-experts layer.
+\newblock In \emph{ICLR}, 2017.
+
+\bibitem[Sukhbaatar et~al.(2019)Sukhbaatar, Grave, Lample, Jegou, and
+  Joulin]{sukhbaatar2019augmenting}
+Sainbayar Sukhbaatar, Edouard Grave, Guillaume Lample, Herve Jegou, and Armand
+  Joulin.
+\newblock Augmenting self-attention with persistent memory.
+\newblock In \emph{NeurIPS}, 2019.
+
+\bibitem[van~den Oord et~al.(2017)van~den Oord, Vinyals, and
+  Kavukcuoglu]{van2017neural}
+Aaron van~den Oord, Oriol Vinyals, and Koray Kavukcuoglu.
+\newblock Neural discrete representation learning.
+\newblock In \emph{NeurIPS}, 2017.
+
+\bibitem[Wu et~al.(2024)Wu, Sukhbaatar, and Lample]{wu2024memory}
+Vincent-Pierre Wu, Sainbayar Sukhbaatar, and Guillaume Lample.
+\newblock Memory layers at scale.
+\newblock \emph{arXiv preprint arXiv:2412.09764}, 2024.
+
+\bibitem[Yu et~al.(2024)Yu, Lezama, Cremers, Liang, Lu, Tuzel, Karagoz, and
+  Jia]{yu2024image}
+Qihang Yu, Jose Lezama, Daniel Cremers, Jia Liang, Hao Lu, Oncel Tuzel, Aysegul
+  Karagoz, and Jiahui Jia.
+\newblock An image is worth 32 tokens for reconstruction and generation.
+\newblock In \emph{NeurIPS}, 2024.
+
+\end{thebibliography}
