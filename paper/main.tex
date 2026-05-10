@@ -1,0 +1,421 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage{multirow}
+
+\bibliographystyle{plainnat}
+
+\title{Two Negative Results for Vector Symbolic Architectures:\\
+FFN Replacement and Compositional Image Generation}
+
+\author{
+Peter C.\\
+Independent Researcher\\
+\texttt{peterc3@live.com}
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Vector Symbolic Architectures (VSAs) offer algebraically structured representations---binding, bundling, permutation---that are $O(D)$ and matmul-free.
+These properties make VSA a natural candidate for (1)~replacing dense feed-forward networks with structured retrieval, and (2)~compositional image generation via token binding.
+We conduct systematic experiments testing both hypotheses and find that neither works, for different but complementary reasons.
+
+\textbf{Case Study~1: FFN Replacement.}
+We test VSA memory layers as replacements for feed-forward networks in Qwen3.6-27B.
+The failure mode is a rank bottleneck: VSA's cleanup$\to$bind$\to$retrieve pipeline has effective rank bounded by top-$k$ (typically~4), while FFN mappings are ${\sim}89\%$ linear with effective rank ${>}2048$.
+A 164K-parameter rank-16 linear projection captures more variance than a 35M-parameter VSA memory layer.
+
+\textbf{Case Study~2: Compositional Image Generation.}
+We test VSA binding for encoding image token sequences from TiTok VQ-8K (64 tokens $\times$ 8192 codebook).
+The failure has two independent causes: (a)~FHRR superposition of 64 bindings cannot support 8192-way retrieval ($0\%$ accuracy at all $D$ tested), and (b)~real images do not share token multisets (${<}9\%$ overlap), so the permutation-based generation framing is inapplicable.
+
+\textbf{Positive findings.}
+We identify conditions where VSA succeeds: permutation locality in TiTok, 100\% exact permutation recovery at $D{\ge}2048$, and SVD-aligned codebooks capturing 50\% more variance than random.
+These successes illuminate the boundary: VSA excels at structured, low-cardinality operations but fails when the target requires high-rank continuous mappings or high-cardinality discrete retrieval.
+\end{abstract}
+
+%----------------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+Vector Symbolic Architectures (VSAs), also known as hyperdimensional computing, have attracted renewed interest as a biologically plausible and algebraically structured alternative to standard neural network operations~\citep{kanerva2009hyperdimensional, plate2003holographic}.
+VSA represents data as high-dimensional vectors and computes with three core operations: \emph{binding} (element-wise multiplication), \emph{bundling} (superposition via addition), and \emph{permutation} (cyclic shift).
+These operations are $O(D)$, matmul-free, and support exact inversion---properties that are absent in standard dense layers.
+
+Two applications stand out as natural fits for VSA's strengths:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{FFN replacement.} Feed-forward networks consume two-thirds of transformer parameters and are known to store factual knowledge as key-value associations~\citep{sukhbaatar2019augmenting}.
+VSA's bind-and-retrieve mechanism is a direct analog of associative memory, suggesting that VSA memory layers could replace dense FFNs with structured retrieval at lower cost.
+\item \textbf{Compositional image generation.} Image tokenizers like TiTok~\citep{yu2024image} encode images as sequences of discrete tokens.
+VSA binding naturally represents position$\to$content mappings, and permutation operations could support compositional manipulation of token arrangements.
+\end{enumerate}
+
+We test both hypotheses with systematic experiments and find that \emph{neither works}, for different but complementary reasons.
+
+\paragraph{FFN replacement} fails due to a \textbf{rank bottleneck}: VSA's top-$k$ retrieval constrains output rank to ${\le}k$, while FFN effective rank exceeds 2048.
+
+\paragraph{Image generation} fails due to a \textbf{capacity bottleneck} (64 superposed bindings cannot support 8192-way retrieval) \emph{and} a \textbf{framing mismatch} (images do not share token multisets, invalidating the permutation premise).
+
+\paragraph{Positive findings} narrow the scope: VSA achieves 100\% exact match for permutation encoding at $D{\ge}2048$ (64-way classification), confirming that VSA works for structured, low-cardinality operations.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=*]
+\item Two independent case studies demonstrating VSA limitations in complementary domains.
+\item A rank-bottleneck diagnosis for FFN replacement (theoretical proof sketch + empirical confirmation).
+\item Capacity analysis for VSA token binding: theory predicts ${\sim}\log_2(D/N)$ bits per retrieval; experiments confirm.
+\item Positive result: VSA permutation encoding achieves 100\% exact match at $D{=}2048$ for 64-position permutations.
+\item Negative result: TiTok VQ-8K token multisets have ${<}9\%$ overlap between images, invalidating permutation-based generation.
+\end{enumerate}
+
+%----------------------------------------------------------------------
+\section{Background}
+\label{sec:background}
+
+\subsection{Vector Symbolic Architectures}
+
+We use FHRR (Frequency Holographic Reduced Representation)~\citep{plate2003holographic}, where each symbol is a $D$-dimensional complex phasor $\mathbf{x} = e^{i\boldsymbol{\theta}}$ with $\boldsymbol{\theta} \in [-\pi, \pi)^D$.
+Binding is element-wise complex multiplication: $\text{bind}(\mathbf{a}, \mathbf{b}) = \mathbf{a} \odot \mathbf{b}$.
+Bundling is complex addition followed by normalization: $\text{bundle}(\mathbf{a}, \mathbf{b}) = \text{normalize}(\mathbf{a} + \mathbf{b})$.
+Unbinding uses the conjugate: $\text{unbind}(\mathbf{c}, \mathbf{a}) = \mathbf{c} \odot \mathbf{a}^*$.
+
+The storage capacity for $N$ superposed bindings is approximately $\log_2(D/N)$ bits per retrieval~\citep{frady2018theory}.
+This means that with $N{=}64$ bindings and $D{=}4096$, each retrieval can distinguish among at most $2^6 = 64$ items---far below the 8192-entry codebook ($2^{13}$) needed for image token retrieval.
+
+\subsection{Feed-Forward Networks in Transformers}
+
+Standard transformer FFNs consist of an up-projection, nonlinear activation, and down-projection: $\text{FFN}(\mathbf{x}) = W_2 \cdot \sigma(W_1 \mathbf{x})$.
+These layers contain $2 \times d_\text{model} \times d_\text{ffn}$ parameters per layer and are known to store factual knowledge~\citep{sukhbaatar2019augmenting}.
+
+\subsection{Image Tokenization with TiTok}
+
+TiTok~\citep{yu2024image} is a 1D image tokenizer that encodes a $256{\times}256$ image into 64 discrete tokens from an 8192-entry codebook ($64$ dimensions per entry).
+We use the frozen pre-trained \texttt{titok\_bl64\_vq8k\_imagenet} model (Apache~2.0 license) throughout.
+
+%----------------------------------------------------------------------
+\section{Case Study 1: VSA for FFN Replacement}
+\label{sec:ffn}
+
+\subsection{Setup}
+
+We extract activation pairs $(x_\text{in}, x_\text{out})$ from Qwen3.6-27B~\citep{qwen2024} ($d_\text{model}{=}5120$, 64 layers) at layers~3, 27, and~43.
+We sample 50{,}000 tokens from FineWeb-Edu with 5\% held out for validation.
+The metric is \emph{variance captured}: $\text{Var}\% = (1 - \text{MSE}_\text{val} / \text{MSE}_\text{zero}) \times 100\%$, where $\text{MSE}_\text{zero}$ is the mean squared error of predicting zero.
+
+\subsection{Architectures Tested}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{VSA V1} (frozen random codebooks): standard FHRR bind-retrieve with random position and content phasors.
+\item \textbf{VSA V2} (learned + Gumbel-softmax): codebook entries and routing learned end-to-end.
+\item \textbf{VSA-MoE}: VSA routing selects experts in a mixture-of-experts architecture.
+\item \textbf{Baselines}: rank-$r$ linear (SVD), rank-$r$ + MLP, learned-gate MoE.
+\end{itemize}
+
+\subsection{Results}
+
+Table~\ref{tab:arch} shows the architecture comparison at layer~27.
+The key finding: a 164K-parameter rank-16 linear projection (5.9\%) \emph{outperforms} a 35M-parameter VSA memory layer (4.8\%).
+Rank-2048 linear (36.6\%) dominates all VSA variants by $7\times$ or more.
+
+\begin{table}[h]
+\centering
+\caption{Architecture comparison (layer~27, Qwen3.6-27B).}
+\label{tab:arch}
+\begin{tabular}{lcc}
+\toprule
+Architecture & Var\% & Params \\
+\midrule
+Zero baseline & 0.0 & 0 \\
+Cube Memory V1 (frozen VSA) & ${\sim}5$ & 35M \\
+Cube Memory V2 (learned VSA) & 4.8 & 35M \\
+Rank-16 linear (SVD) & 5.9 & 164K \\
+VSA-MoE 16$\times$128 top-4 & 14.2 & 24M \\
+Learned-MoE 8$\times$256 top-2 & 16.2 & 21M \\
+Rank-2048 linear & 36.6 & 21M \\
+\textbf{Rank-2048 + MLP-512} & \textbf{38.4} & \textbf{26M} \\
+Full-rank ceiling & 41.1 & 52M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Studies}
+
+\paragraph{Top-$k$ scaling.}
+Increasing top-$k$ from 4 to 64 does not break the ceiling: variance captured decreases slightly from 2.9\% to 2.7\%.
+This rules out the hypothesis that the bottleneck is insufficient retrieval breadth.
+
+\paragraph{Codebook ablation.}
+SVD-aligned codebooks improve over random (4.3\% vs 2.8\%), confirming that aligning codebook entries with the data manifold helps.
+However, the improvement does not change the conclusion: all VSA variants remain far below linear baselines.
+
+\paragraph{FLOPs comparison.}
+All FLOPs are inference-only forward pass.
+Rank-2048 linear achieves 36.6\% variance at 42M FLOPs/token.
+VSA V2 achieves 4.8\% at 62M FLOPs/token---\emph{worse and slower}.
+
+\paragraph{Rank-equalized comparison.}
+At matched effective rank~4, a rank-4 linear (SVD) yields negative $R^2$ (worse than predicting the mean) at 41K FLOPs, while VSA top-4 achieves 2.9\% at 62M FLOPs.
+VSA's marginal advantage comes from data-dependent routing (selecting different codebook entries per input), but both are catastrophically below rank-2048 linear (36.6\%).
+VSA spends $1514\times$ more FLOPs for this marginal advantage.
+
+\subsection{Diagnosis: The Rank Bottleneck}
+
+The VSA retrieval output is:
+\begin{equation}
+\mathbf{y} = \sum_{j \in \text{top-}k} \alpha_j \cdot \mathbf{v}_j,
+\quad \alpha_j = \text{softmax}(\text{sim}_j),
+\end{equation}
+where $\mathbf{v}_j$ are memory value vectors. This is a convex combination of $k$~vectors, so $\mathbf{y} \in \text{span}\{\mathbf{v}_1, \ldots, \mathbf{v}_k\}$, giving $\text{rank}(\text{output}) \le k$.
+
+With top-$k{=}4$, VSA output rank is at most~4.
+The FFN effective rank exceeds~2048 (singular values decay slowly; see Appendix).
+Retrieval is fundamentally underpowered: the FFN mapping is ${\sim}89\%$ linear, and the remaining ${\sim}11\%$ is better captured by a small MLP than by sparse retrieval.
+
+This rank bottleneck applies to \emph{all} retrieval-based FFN replacements---Product Key Memory~\citep{lample2019large}, holographic reduced representations, or any top-$k$ selection mechanism.
+
+%----------------------------------------------------------------------
+\section{Case Study 2: VSA for Image Generation}
+\label{sec:imgen}
+
+\subsection{Motivation: Permutation-Group Indexed Generation}
+
+We hypothesize that image generation can be framed as token permutation manipulation.
+TiTok encodes images as 64 discrete tokens from an 8192-entry codebook.
+VSA binding naturally represents position$\to$content mappings: $\mathbf{h} = \sum_{i=1}^{64} \text{bind}(\mathbf{p}_i, \mathbf{c}_{t_i})$, where $\mathbf{p}_i$ is a position phasor and $\mathbf{c}_{t_i}$ is a content phasor for token $t_i$.
+
+\subsection{Prerequisite: Permutation Locality (Experiment~0)}
+
+We first validate that the TiTok decoder is smooth with respect to token permutation.
+We encode a test image, apply $N$ random position swaps, decode, and measure MSE against the original.
+
+\begin{table}[h]
+\centering
+\caption{Permutation locality: MSE vs.\ number of random token swaps.}
+\label{tab:permlocality}
+\begin{tabular}{cccccc}
+\toprule
+Swaps & 0 & 1 & 4 & 16 & 64 \\
+\midrule
+MSE & 0.000 & 0.001 & 0.022 & 0.073 & 0.153 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The monotonic relationship (Table~\ref{tab:permlocality}) confirms the generation premise has empirical support: small permutations yield small visual changes.
+
+\subsection{Token Binding Fails (Experiments~1, 1b, 1c, 2)}
+
+\paragraph{Experiment~1: Pure VSA binding.}
+We bind 64 position phasors with content phasors, superpose, unbind each position, and classify against the 8192-entry codebook.
+Theory predicts ${\sim}\log_2(D/64)$ bits per retrieval; 8192 entries need 13~bits.
+Even $D{=}4096$ provides only 6~bits.
+Result: 0\% accuracy at all $D$ tested (Table~\ref{tab:tokenbinding}).
+
+\begin{table}[h]
+\centering
+\caption{Pure VSA token binding: accuracy vs.\ dimension.}
+\label{tab:tokenbinding}
+\begin{tabular}{lcl}
+\toprule
+$D$ & Acc\% & Bits (have / need) \\
+\midrule
+512 & 0.0 & 3.0 / 13.0 \\
+1024 & 0.0 & 4.0 / 13.0 \\
+2048 & 0.0 & 5.0 / 13.0 \\
+4096 & 0.0 & 6.0 / 13.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Experiment~1b: VSA + MLP decoder.}
+Adding a 2-layer MLP after unbinding produces catastrophic overfitting at all $D$: training loss approaches zero while validation loss reaches~25.
+The decoder memorizes training-specific noise patterns.
+An MLP-only control (position one-hot $\to$ MLP $\to$ 8192-way, no VSA) achieves 0.93\% accuracy, confirming the task is impossible from positional information alone.
+
+\paragraph{Experiment~1c: Factored codebook.}
+We decompose $8192 = 128 \times 64$ and use 3-way binding ($\text{pos} \otimes \text{factA} \otimes \text{factB}$), retrieving factors independently.
+A hard ceiling appears at ${\sim}5.8\%$ for the 64-way factor regardless of $D$ (Table~\ref{tab:factored}).
+The bottleneck is structural (cross-talk from superposition), not capacity.
+
+\begin{table}[h]
+\centering
+\caption{Factored codebook ($128\times64$): accuracy per factor.}
+\label{tab:factored}
+\begin{tabular}{lccc}
+\toprule
+$D$ & AccA\% (128-way) & AccB\% (64-way) & Joint\% \\
+\midrule
+512 & 2.2 & 5.6 & 0.1 \\
+1024 & 2.3 & 5.8 & 0.2 \\
+2048 & 2.0 & 5.7 & 0.1 \\
+4096 & 1.9 & 5.9 & 0.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Experiment~2: Real TiTok tokens.}
+We test on 6000 Imagenette images encoded by frozen TiTok.
+Token distribution entropy is 12.85 / 13.00~bits; all 8192 codes are used.
+At $D{=}4096$, accuracy plateaus at 0.61\% after 1500 steps---the same plateau as $D{=}512$.
+Near-uniform codebook usage means real tokens are as hard as random.
+
+\subsection{Permutation Encoding Works (Experiment~3)}
+
+We reframe: encode \emph{permutations} (64-way classification) instead of \emph{tokens} (8192-way).
+This is a pure VSA theory test requiring no training.
+For each permutation $\sigma$, we encode $\mathbf{h}_\sigma = \sum_{i=1}^{64} \text{bind}(\mathbf{p}_i, \mathbf{p}_{\sigma(i)})$ and decode by unbinding each source position and classifying among 64 destinations.
+
+\begin{table}[h]
+\centering
+\caption{Permutation recovery: exact match \% ($n{=}2000$ per condition).}
+\label{tab:perm}
+\begin{tabular}{lcccccc}
+\toprule
+$D$ & $k{=}1$ & $k{=}2$ & $k{=}4$ & $k{=}8$ & $k{=}16$ & $k{=}32$ \\
+\midrule
+256 & 0.0 & 0.0 & 0.0 & 0.0 & 0.0 & 0.3 \\
+512 & 0.0 & 0.0 & 0.0 & 0.0 & 0.0 & 67.2 \\
+1024 & 89.3 & 76.3 & 54.6 & 29.6 & 15.3 & 99.9 \\
+2048 & 99.8 & 99.8 & 99.8 & 98.6 & 96.5 & \textbf{100.0} \\
+4096 & \textbf{100.0} & \textbf{100.0} & \textbf{100.0} & \textbf{100.0} & \textbf{100.0} & \textbf{100.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $D{\ge}2048$, recovery is perfect (0 failures in 2000 test permutations per condition, 95\% CI: [99.8\%, 100\%]).
+The 64-way classification is well within VSA capacity, confirming that VSA excels at structured operations on small discrete sets.
+
+\subsection{But Images Aren't Permutations (Experiment~4)}
+
+We test whether real images can be approximated as permutations of a cluster reference.
+For each image: find nearest cluster (by token histogram similarity, $k$-means), solve optimal assignment via the Hungarian algorithm~\citep{kuhn1955hungarian}, and measure token match rate.
+
+\begin{table}[h]
+\centering
+\caption{Permutation reconstruction: can images be expressed as permutations of references?}
+\label{tab:recon}
+\begin{tabular}{lccc}
+\toprule
+$K$ clusters & Within-cluster overlap & Match rate & ${\ge}50\%$ match \\
+\midrule
+10 & 4.0\% & 2.7\% & 0.2\% \\
+50 & 2.1\% & 5.2\% & 0.8\% \\
+200 & 2.4\% & 8.9\% & 3.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+``Within-cluster overlap'' is the average pairwise multiset intersection size divided by 64 between random pairs in the same cluster.
+``Match rate'' is the fraction of positions where the Hungarian-optimal permutation of the reference yields the correct token.
+
+Each image uses $64/8192 = 0.78\%$ of the codebook.
+Under uniform usage, the expected multiset overlap between two random images is ${\sim}0.5$ tokens (birthday collision rate: $8192 \times (64/8192)^2 \approx 0.5$).
+The permutation framing requires near-complete multiset overlap, which is impossible when the codebook is large and near-uniformly used.
+
+\subsection{Diagnosis: Two Independent Failure Modes}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Capacity failure.} FHRR superposition of $N$ bindings provides ${\sim}\log_2(D/N)$ bits per retrieval. With $N{=}64$ and codebook size 8192 (13~bits), no feasible $D$ suffices. Reducing cardinality to 64-way (permutations) solves this.
+\item \textbf{Framing failure.} Even if token retrieval worked, permutation-based generation requires shared token multisets between images. With 8192 near-uniformly-used codebook entries, this assumption fails catastrophically (${<}9\%$ overlap).
+\end{enumerate}
+
+%----------------------------------------------------------------------
+\section{Positive Findings and Boundary Conditions}
+\label{sec:positive}
+
+\subsection{Where VSA Succeeds}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Permutation representation.} 100\% exact recovery at $D{=}2048$ for 64-position permutations (Experiment~3). VSA is ideal for structured operations on small discrete sets.
+\item \textbf{Permutation locality.} The TiTok decoder is smooth with respect to token permutation (Experiment~0). This property is real and potentially useful for local image editing.
+\item \textbf{SVD-aligned codebooks.} Initializing VSA codebooks from SVD of the target activation matrix captures 50\% more variance than random (4.3\% vs 2.8\%).
+\end{enumerate}
+
+\subsection{The Boundary}
+
+VSA succeeds when classification cardinality is low (64 positions, not 8192 codes), the target has discrete compositional structure, and operations are group-theoretic.
+VSA fails when the target mapping is high-rank and continuous, retrieval requires high-cardinality discrimination from superposition, or the compositional framing does not match the data.
+
+\subsection{Generalization}
+
+The rank bottleneck (Case Study~1) applies to \emph{all} retrieval-based FFN replacements: Product Key Memory~\citep{lample2019large}, Memory Layers~\citep{wu2024memory}, or any top-$k$ selection mechanism.
+The output of any top-$k$ retrieval is constrained to a $k$-dimensional subspace, which is insufficient for the high-rank mappings that FFNs implement.
+
+The capacity limit (Case Study~2) applies to any VSA scheme that superposes $N$ bindings and retrieves from codebook size $C$: reliable retrieval requires $D \gg N \times C$.
+
+%----------------------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{VSA and Hyperdimensional Computing.}
+The theoretical foundations of VSA trace to Kanerva's sparse distributed memory~\citep{kanerva2009hyperdimensional} and Plate's holographic reduced representations~\citep{plate2003holographic}.
+\citet{frady2018theory} established capacity bounds for FHRR, which our experiments confirm empirically.
+
+\paragraph{Memory Layers.}
+Product Key Memory~\citep{lample2019large} and recent scaling work~\citep{wu2024memory, sukhbaatar2019augmenting} use key-value retrieval to augment or replace FFN layers.
+Our rank bottleneck analysis applies to these methods whenever they use top-$k$ selection.
+
+\paragraph{FFN Compression.}
+Low-rank factorization~\citep{hsu2022language}, pruning~\citep{frantar2023sparsegpt}, and distillation~\citep{hinton2015distilling} are alternatives to memory-based replacement.
+Our results show that even simple rank-2048 linear projections dramatically outperform structured retrieval approaches.
+
+\paragraph{Image Tokenization.}
+VQ-VAE~\citep{van2017neural}, VQGAN~\citep{esser2021taming}, and TiTok~\citep{yu2024image} have established discrete tokenization as a viable representation for image generation.
+Our permutation locality finding (Experiment~0) adds a new characterization of TiTok's latent space.
+
+\paragraph{Sparse MoE.}
+Mixture-of-experts approaches~\citep{shazeer2017outrageously, fedus2022switch, jiang2024mixtral} use routing to select among specialized sub-networks.
+Our VSA-MoE variant (14.2\%) underperforms learned-gate MoE (16.2\%), suggesting that VSA routing provides no advantage over standard gating.
+
+%----------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+We tested VSA in two settings where its algebraic properties should provide advantages: structured FFN replacement and compositional image generation.
+Both fail, for different reasons:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{FFN replacement: the rank bottleneck.} FFN mappings are ${\sim}89\%$ linear with effective rank ${>}2048$. VSA retrieval collapses rank to top-$k$. Linear projections dominate at every parameter budget.
+\item \textbf{Image generation: capacity bottleneck plus framing mismatch.} Superposition of 64 bindings provides ${\sim}6$ bits per retrieval; 8192 codebook entries need 13~bits. And even with perfect retrieval, images do not share token multisets, so the permutation framing fails.
+\end{enumerate}
+
+The positive findings narrow VSA's useful scope: it excels at representing discrete group operations (permutations of 64 positions: 100\% exact match) but fails when the target requires either high-rank continuous mappings or high-cardinality discrete retrieval.
+
+These results suggest that VSA's future in deep learning lies in genuinely compositional, low-cardinality tasks---symbolic reasoning, relational learning, discrete program synthesis---rather than as a drop-in replacement for dense continuous computations.
+
+All code and data are available at \url{https://github.com/Peterc3-dev/cube-memory}.
+
+%----------------------------------------------------------------------
+\bibliography{references}
+
+%----------------------------------------------------------------------
+\appendix
+\section{Experimental Details}
+\label{app:details}
+
+\paragraph{Hardware.}
+All Case Study~2 experiments ran on an AMD Ryzen~AI~9 HX~370 APU with 23\,GB RAM (no discrete GPU).
+Case Study~1 activation extraction used a ThinkCentre M70q Gen~5 with 32\,GB RAM.
+Total compute: approximately 8~hours across both machines.
+
+\paragraph{Hyperparameters.}
+VSA experiments used AdamW with learning rate $10^{-3}$, weight decay $0.01$, cosine annealing, batch size 16 (64 for FFN distillation), and 2000--3000 training steps.
+Position phasors were frozen random; content phasors were learned.
+
+\paragraph{Reproducibility.}
+All experiments use fixed random seeds (42).
+The TiTok model is the publicly available \texttt{yucornetto/tokenizer\_titok\_bl64\_vq8k\_imagenet} checkpoint.
+Imagenette~320 was used for image tokenization (6000 images: 5000 train, 1000 val).
+
+\end{document}
