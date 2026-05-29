@@ -1,0 +1,121 @@
+--- common/debug.cpp.bak	2026-05-29 09:14:00.058876451 -0400
++++ common/debug.cpp	2026-05-29 09:17:40.304409980 -0400
+@@ -7,6 +7,11 @@
+ #include <regex>
+ #include <string>
+ #include <vector>
++#include <map>
++#include <fstream>
++#include <filesystem>
++#include <cstdlib>
++#include <cstdint>
+ 
+ struct common_debug_cb_user_data::impl {
+     std::vector<uint8_t>    data;
+@@ -140,6 +145,88 @@
+  * @param user_data user data to pass at each call back
+  * @return true to receive data or continue the graph, false otherwise
+  */
++
++// ---- CACT activation dump (added for VSA Case Study 1 second-model result) ----
++static std::map<std::string,int> g_cact_counters;
++
++static const char * g_cact_out_dir() {
++    static const char * d = std::getenv("CACT_OUT_DIR");
++    return d;
++}
++
++// map ffn_inp-{L} -> layer_{L}_in , ffn_out-{L} -> layer_{L}_out
++static bool cact_map_dir(const char * name, std::string & out) {
++    std::string n(name);
++    if (n.rfind("ffn_inp-",0)==0) {
++        out = "layer_" + n.substr(8) + "_in";
++        return true;
++    }
++    if (n.rfind("ffn_out-",0)==0) {
++        out = "layer_" + n.substr(8) + "_out";
++        return true;
++    }
++    return false;
++}
++
++// write a CACT chunk: 16-byte header (<4sIII) magic,version,n_tokens,n_embd
++// then n_tokens*n_embd bf16 (truncated from f32), little-endian.
++static void cact_write_chunk(const ggml_tensor * t, const uint8_t * data) {
++    const char * base = g_cact_out_dir();
++    if (!base) return;
++    if (t->type != GGML_TYPE_F32) return;
++    std::string subdir;
++    if (!cact_map_dir(t->name, subdir)) return;
++
++    const uint32_t n_embd   = (uint32_t) t->ne[0];
++    const uint32_t n_tokens = (uint32_t) t->ne[1];
++    if (n_embd == 0 || n_tokens == 0) return;
++
++    std::filesystem::path dirp = std::filesystem::path(base) / subdir;
++    std::error_code ec;
++    std::filesystem::create_directories(dirp, ec);
++
++    // Seed per-dir counter from existing chunk files so separate process
++    // invocations (one per doc) keep appending instead of overwriting.
++    auto cit = g_cact_counters.find(subdir);
++    if (cit == g_cact_counters.end()) {
++        int existing = 0;
++        for (auto & de : std::filesystem::directory_iterator(dirp, ec)) {
++            if (de.path().filename().string().rfind("chunk_", 0) == 0) existing++;
++        }
++        cit = g_cact_counters.emplace(subdir, existing).first;
++    }
++    int idx = cit->second++;
++    char fname[64];
++    snprintf(fname, sizeof(fname), "chunk_%05d.bin", idx);
++    std::filesystem::path fp = dirp / fname;
++
++    std::ofstream f(fp, std::ios::binary);
++    if (!f) return;
++
++    // header
++    const char magic[4] = { (char)0x43, (char)0x41, (char)0x43, (char)0x54 }; // "CACT"
++    uint32_t version = 1u;
++    f.write(magic, 4);
++    f.write(reinterpret_cast<const char*>(&version), 4);
++    f.write(reinterpret_cast<const char*>(&n_tokens), 4);
++    f.write(reinterpret_cast<const char*>(&n_embd), 4);
++
++    // payload: row-major n_tokens x n_embd. ggml ne[0]=n_embd is contiguous,
++    // ne[1]=n_tokens stride nb[1]. Iterate tokens then embd.
++    const size_t nb0 = t->nb[0];
++    const size_t nb1 = t->nb[1];
++    std::vector<uint16_t> rowbuf(n_embd);
++    for (uint32_t it = 0; it < n_tokens; ++it) {
++        const uint8_t * row = data + it * nb1;
++        for (uint32_t ie = 0; ie < n_embd; ++ie) {
++            uint32_t u = *(const uint32_t*)(row + ie * nb0);
++            rowbuf[ie] = (uint16_t)(u >> 16); // bf16 truncation
++        }
++        f.write(reinterpret_cast<const char*>(rowbuf.data()), (std::streamsize)n_embd * 2);
++    }
++}
++// ---- end CACT dump ----
++
+ bool common_debug_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
+     auto * cb_data = (common_debug_cb_user_data *) user_data;
+     auto * pimpl = cb_data->pimpl.get();
+@@ -181,9 +268,15 @@
+         ggml_backend_tensor_get(t, pimpl->data.data(), 0, n_bytes);
+     }
+ 
++    uint8_t * host_data = is_host ? (uint8_t *) t->data : pimpl->data.data();
++
++    // CACT dump for filtered ffn_inp / ffn_out tensors (ask==false path only)
++    if (matches_filter) {
++        cact_write_chunk(t, host_data);
++    }
++
+     if (!ggml_is_quantized(t->type) && matches_filter) {
+-        uint8_t * data = is_host ? (uint8_t *) t->data : pimpl->data.data();
+-        common_debug_print_tensor(data, t->type, t->ne, t->nb, 3, pimpl->abort_on_nan);
++        common_debug_print_tensor(host_data, t->type, t->ne, t->nb, 3, pimpl->abort_on_nan);
+     }
+ 
+     return true;
