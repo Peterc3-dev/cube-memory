@@ -37,7 +37,7 @@ jobs:
       # the rust-gpu crates, but the host crate is plain stable Rust.
       - name: Install stable toolchain
         run: |
-          rustup toolchain install stable --component clippy rustfmt
+          rustup toolchain install stable --component clippy --component rustfmt
           rustup override set stable
 
       - name: Cache cargo
