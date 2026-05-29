@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Scope note: this repo is a research/experiment record (a documented
+# negative result). CI covers only what runs deterministically without
+# special hardware or large downloads:
+#
+#   * The Rust `cube-memory-host` crate's CPU reference path: build,
+#     clippy, and the `cpu` unit tests. These run on STABLE Rust.
+#   * A Python syntax check + ruff lint over the experiment scripts.
+#
+# Deliberately NOT in CI (and why):
+#   * The rust-gpu shader build (`cube-memory-shader{,-builder}`) needs
+#     the pinned nightly in `shaders/rust-toolchain.toml` plus rust-src /
+#     rustc-dev / llvm-tools — too heavy and version-fragile for hosted CI.
+#   * The GPU/CPU parity tests in `shaders/cube-memory-host/tests/parity.rs`
+#     require a Vulkan adapter and the prebuilt `.spv`; GitHub runners have
+#     no GPU.
+#   * The Python experiment scripts need PyTorch and local model
+#     checkpoints, so they are linted but not executed.
+
+jobs:
+  rust:
+    name: Rust host crate (CPU path)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: shaders
+    steps:
+      - uses: actions/checkout@v4
+
+      # Use stable explicitly; the rust-toolchain.toml pins a nightly for
+      # the rust-gpu crates, but the host crate is plain stable Rust.
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --component clippy rustfmt
+          rustup override set stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            shaders/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('shaders/**/Cargo.toml') }}
+
+      - name: Build host crate
+        run: cargo build -p cube-memory-host
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy -p cube-memory-host --all-targets -- -D warnings
+
+      - name: CPU reference unit tests
+        run: cargo test -p cube-memory-host --lib
+
+  python:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pipx install ruff
+
+      - name: Syntax check (compile all)
+        run: python -m compileall -q phase0 phase1 rubik-gen *.py
+
+      - name: Ruff lint
+        # Non-blocking for now: the experiment scripts predate this lint
+        # config, so surface issues without failing the build.
+        run: ruff check . || true
