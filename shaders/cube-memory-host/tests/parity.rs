@@ -105,7 +105,7 @@ fn fhrr_bind_parity() {
 
     let ctx = GpuCtx::new(&shader_path());
     let push = FhrrBindPushConsts { n: n as u32 };
-    let groups = ((n as u32 + 63) / 64, 1, 1);
+    let groups = ((n as u32).div_ceil(64), 1, 1);
     let gpu_out: Vec<Vec2> = ctx.run(
         "fhrr_bind",
         push,
@@ -127,7 +127,7 @@ fn fhrr_unbind_parity() {
 
     let ctx = GpuCtx::new(&shader_path());
     let push = FhrrBindPushConsts { n: n as u32 };
-    let groups = ((n as u32 + 63) / 64, 1, 1);
+    let groups = ((n as u32).div_ceil(64), 1, 1);
     let gpu_out: Vec<Vec2> = ctx.run(
         "fhrr_unbind",
         push,
@@ -152,7 +152,7 @@ fn fhrr_unitize_parity() {
 
     let ctx = GpuCtx::new(&shader_path());
     let push = FhrrBindPushConsts { n: n as u32 };
-    let groups = ((n as u32 + 63) / 64, 1, 1);
+    let groups = ((n as u32).div_ceil(64), 1, 1);
     let gpu_out: Vec<Vec2> = ctx.run(
         "fhrr_unitize",
         push,
@@ -179,7 +179,7 @@ fn fhrr_superpose_parity() {
         n: n as u32,
         k: k as u32,
     };
-    let groups = ((n as u32 + 63) / 64, 1, 1);
+    let groups = ((n as u32).div_ceil(64), 1, 1);
     let gpu_out: Vec<Vec2> = ctx.run(
         "fhrr_superpose",
         push,

@@ -34,10 +34,12 @@ impl GpuCtx {
             compatible_surface: None,
         }))
         .expect("no wgpu Vulkan adapter found");
-        let mut limits = wgpu::Limits::default();
         // Each kernel uses a small push-constant block (12 bytes max
         // across our six entry points). 32 is a safe ceiling.
-        limits.max_push_constant_size = 32;
+        let limits = wgpu::Limits {
+            max_push_constant_size: 32,
+            ..Default::default()
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("cube-memory-host"),
@@ -206,6 +208,10 @@ impl GpuCtx {
     /// B's scratch is bound at `scratch_binding_b` (read-only). Pass
     /// B's output is the last binding. Both passes share a single
     /// push-constant struct.
+    // Many positional args by design: this is a test-only harness for
+    // two-pass kernels, and bundling them into a config struct would add
+    // boilerplate without improving the call sites in `tests/parity.rs`.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_pair<P, T>(
         &self,
         entry_a: &str,
@@ -273,7 +279,7 @@ impl GpuCtx {
         let pl_a = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cube-mem pl a"),
             bind_group_layouts: &[&bgl_a],
-            push_constant_ranges: &[pcr.clone()],
+            push_constant_ranges: std::slice::from_ref(&pcr),
         });
         let pl_b = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cube-mem pl b"),

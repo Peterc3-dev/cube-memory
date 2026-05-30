@@ -70,14 +70,28 @@ will need editing for your environment.
 
 ```bash
 cd shaders
-cargo test            # runs the FHRR algebra kernels on CPU (parity test)
+
+# CPU reference unit tests — pure Rust, run on the stable toolchain,
+# no GPU or prebuilt SPIR-V needed. These pin the FHRR/Cube-Memory
+# reference algebra that the GPU parity tests compare against.
+cargo test -p cube-memory-host --lib
+
+# Full GPU/CPU parity tests — require a Vulkan adapter AND the shader
+# binary built first via the rust-gpu nightly toolchain:
+cargo run  -p cube-memory-shader-builder --release
+cargo test -p cube-memory-host --release   # runs tests/parity.rs
 ```
 
-See `shaders/README.md` for the rust-gpu toolchain details.
+See `shaders/README.md` for the rust-gpu toolchain details (the pinned
+nightly and components needed to build the SPIR-V).
 
 ## Limitations
 
-- This is research/experiment code, not a library — no stable API, no packaging, no CI.
+- This is research/experiment code, not a library — no stable API and no packaging.
+  CI (`.github/workflows/ci.yml`) covers only the deterministic, hardware-free
+  surface: the Rust host crate's CPU reference path (build + clippy + unit tests)
+  and a Python syntax check / ruff lint. The rust-gpu shader build and the GPU
+  parity tests are out of CI scope (nightly toolchain + Vulkan adapter required).
 - Hardware-specific: numbers were measured on an AMD Radeon 890M (gfx1150) Vulkan build of
   llama.cpp; the bandwidth and t/s figures are local measurements, not general benchmarks.
 - The headline conclusion is negative; the layer does not match a linear baseline.
